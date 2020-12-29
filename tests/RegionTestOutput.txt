@@ -1,0 +1,19 @@
+Pro Tools 12 Session: Samplerate = 44100
+1 wavs, 3 regions
+
+Audio file (WAV#) @ offset, length:
+`region_name_WAV.wav`, w(0) @ 0, 5910132
+
+Region (Region#) (WAV#) @ into-sample, length:
+`region_name_region`, r(0), w(1370), @ 0, 5910132
+`region_name_region-01`, r(1), w(1370), @ 0, 2650000
+`region_name_region-03`, r(2), w(346), @ 950000, 1290000
+
+Track name (Track#) (Region#) @ Absolute:
+`Track_Name` t(0) r(1) @ 0
+`Audio 1` t(1) r(1) @ 0
+`Audio 2` t(2) r(1) @ 0
+`Audio 2` t(3) r(1) @ 0
+`Audio 3` t(4) r(2) @ 950000
+`Audio 3` t(5) r(2) @ 950000
+

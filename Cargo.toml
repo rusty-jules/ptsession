@@ -1,0 +1,13 @@
+[package]
+name = "ptsession"
+version = "0.1.0"
+authors = ["Julian Aichholz <julian@reboundsound.la>"]
+edition = "2018"
+
+[dependencies]
+log = "0.4"
+serde = { version = "*", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+env_logger = "*"
+serde_json = "*"
