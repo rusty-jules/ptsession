@@ -83,21 +83,9 @@ fn gen_xor_delta(xor_value: u8, mul: u8, negative: bool) -> i8 {
     return 0;
 }
 
-pub(crate) fn find_bitcode(ptf_unxored: &[u8]) -> isize {
+pub(crate) fn find_bitcode(ptf_unxored: &[u8]) -> Option<usize> {
     const BITCODE: [u8; 2] = 0x2f2b_u16.to_be_bytes();
-    let mut found: isize;
-
-    for i in 0..4096 {
-        found = i as isize;
-        for j in 0..2 {
-            if ptf_unxored[i + j] != BITCODE[j] {
-                found -= 1;
-                break;
-            }
-        }
-        if found > 0 {
-            return found
-        }
-    }
-    -1
+    ptf_unxored
+        .windows(BITCODE.len())
+        .position(|window| window == &BITCODE)
 }

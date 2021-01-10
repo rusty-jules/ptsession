@@ -70,7 +70,7 @@ impl PtSessionParser {
 
         // Check BitCode
         debug!("BitCode check...");
-        if ptf_unxored[0] != 0x03 && decrypt::find_bitcode(&ptf_unxored[..]) != 1 {
+        if ptf_unxored[0] != 0x03 && decrypt::find_bitcode(&ptf_unxored[..]).is_none() {
             return Err(PtError::BitCode)
         }
 
