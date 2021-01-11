@@ -11,6 +11,33 @@ use log::{debug, warn, trace};
 use std::io::Cursor;
 use std::convert::TryInto;
 
+macro_rules! filter_blocks {
+    ($block_iter:expr, $child:expr) => {
+        $block_iter
+            .flat_map(|block| block.children.iter())
+            .filter(|children| children.content_type == $child as u16)
+    };
+
+    ($block_iter:expr, $child:expr => $( $children:expr )=>*) => {
+        filter_blocks!({ filter_blocks!($block_iter, $child) }, $($children),+)
+    };
+}
+
+macro_rules! children_of {
+    ($block:expr, $child:expr) => {
+        $block.children.iter()
+            .filter(|children| children.content_type == $child as u16)
+    };
+
+    ($block:expr, $child1:expr, $child2:expr) => {
+        $block.children.iter()
+            .filter(|children| {
+                children.content_type == $child1 as u16 ||
+                    children.content_type == $child2 as u16
+            })
+    };
+}
+
 #[derive(Default)]
 struct BlockMap {
     wav_blocks: Vec<Block>,
@@ -175,20 +202,22 @@ impl PtSessionParser {
 
     fn parse_version(&mut self) -> Result<(), PtError> {
         match self.parse_block_at(0x1f, None, 0) {
-            Ok(block) => {
-                if block.content_type == PTCD::INFO_Version as u16 {
+            Ok(block) => match block.content_type.try_into() {
+                Ok(PTCD::INFO_Version) => {
                     // old PT
                     let skip = self.parse_str_at(block.offset + 3)
                         .map_err(PtError::Io)?
                         .len() + 8;
                     self.set_position(block.offset + 3 + skip);
                     self.version = Some(self.read_u32().map_err(PtError::Io)? as u8);
-                } else if block.content_type == PTCD::INFO_Path_of_Session as u16 {
+                }
+                Ok(PTCD::INFO_Path_of_Session) => {
                     // new PT
                     self.set_position(block.offset + 20);
                     let version = 2 + self.read_u32().map_err(PtError::Io)? as u8;
                     self.version = Some(version);
-                } else {
+                }
+                _ => {
                     return Err(
                         PtError::Version(
                             format!("Could not parse version block type: {:#04x}",
@@ -311,28 +340,36 @@ impl PtSessionParser {
             let num_waves = self.read_u32()?;
             debug!("Num Wavs: {}", num_waves);
 
-            for child in &wav_list.children {
-                if child.content_type == PTCD::WAV_Names as u16 {
-                    self.set_position(child.offset + 11);
-                    let mut n = 0;
+            for child in children_of!(wav_list, PTCD::WAV_Names) {
+                self.set_position(child.offset + 11);
+                let mut n = 0;
 
-                    debug!("Found WAV @pos {} offset {} size {}", self.position(), child.offset, child.size);
+                debug!("Found WAV @pos {} offset {} size {}", self.position(), child.offset, child.size);
 
-                    while self.position() < child.offset + child.size && n < num_waves {
-                        let wav_name = self.parse_str()?;
-                        let wav_type =
-                            unsafe { std::str::from_utf8_unchecked(&self.reader.get_ref()[self.position()..(self.position() + 4)]).to_string() };
-                        self.increment_position(9);
+                while self.position() < child.offset + child.size && n < num_waves {
+                    let wav_name = self.parse_str()?;
+                    let wav_type =
+                        unsafe { std::str::from_utf8_unchecked(&self.reader.get_ref()[self.position()..(self.position() + 4)]).to_string() };
+                    self.increment_position(9);
 
-                        if wav_name.contains(".grp")
-                            || wav_name.contains("Audio Files")
-                            || wav_name.contains("Fade Files")
+                    if wav_name.contains(".grp")
+                        || wav_name.contains("Audio Files")
+                        || wav_name.contains("Fade Files")
+                    {
+                        continue;
+                    }
+
+                    // Cull container types
+                    if self.version.unwrap() < 10 {
+                        if !(wav_type.contains("WAVE")
+                            || wav_type.contains("EVAW")
+                            || wav_type.contains("AIFF")
+                            || wav_type.contains("FFIA"))
                         {
                             continue;
                         }
-
-                        // Cull container types
-                        if self.version.unwrap() < 10 {
+                    } else {
+                        if wav_type.len() != 0 {
                             if !(wav_type.contains("WAVE")
                                 || wav_type.contains("EVAW")
                                 || wav_type.contains("AIFF")
@@ -340,40 +377,25 @@ impl PtSessionParser {
                             {
                                 continue;
                             }
-                        } else {
-                            if wav_type.len() != 0 {
-                                if !(wav_type.contains("WAVE")
-                                    || wav_type.contains("EVAW")
-                                    || wav_type.contains("AIFF")
-                                    || wav_type.contains("FFIA"))
-                                {
-                                    continue;
-                                }
-                            } else if !(wav_name.contains(".wav") || wav_name.contains(".aif")) {
-                                continue;
-                            }
+                        } else if !(wav_name.contains(".wav") || wav_name.contains(".aif")) {
+                            continue;
                         }
-
-                        let wav = Wav {
-                            index: n as u16,
-                            file_name: wav_name,
-                            ..Default::default()
-                        };
-
-                        audio_files.push(wav);
-                        n += 1;
                     }
+
+                    let wav = Wav {
+                        index: n as u16,
+                        file_name: wav_name,
+                        ..Default::default()
+                    };
+
+                    audio_files.push(wav);
+                    n += 1;
                 }
             }
         }
 
         let mut wav_iter = audio_files.iter_mut();
-        for block in wav_blocks.iter()
-            .flat_map(|block| block.children.iter())
-            .filter(|block| block.content_type == PTCD::WAV_Metadata as u16)
-            .flat_map(|block| block.children.iter())
-            .filter(|block| block.content_type == PTCD::WAV_SampleRate_Size as u16)
-        {
+        for block in filter_blocks!(wav_blocks.iter(), PTCD::WAV_Metadata => PTCD::WAV_SampleRate_Size) {
             if let Some(wav) = wav_iter.next() {
                 self.set_position(block.offset + 8);
                 wav.len = self.read_u64()?;
@@ -398,51 +420,42 @@ impl PtSessionParser {
 
         // Wav source -> Regions
         for block in region_to_wav_blocks {
-            for b in &block.children {
-                if b.content_type == PTCD::AUDIO_Region_Name_Number_v5 as u16
-                    || b.content_type == PTCD::AUDIO_Region_Name_Number_v10 as u16
+            for b in children_of!(block, PTCD::AUDIO_Region_Name_Number_v5, PTCD::AUDIO_Region_Name_Number_v10) {
+                self.set_position(b.offset + 11);
+                let mut region = self.parse_region_info(b.offset + b.size)?;
+                if let Some(wav) = audio_files
+                    .iter()
+                    .find(|wav| region.wav.as_ref().unwrap().index == wav.index)
                 {
-                    self.set_position(b.offset + 11);
-                    let mut region = self.parse_region_info(b.offset + b.size)?;
-                    if let Some(wav) = audio_files
-                        .iter()
-                        .find(|wav| region.wav.as_ref().unwrap().index == wav.index)
-                    {
-                        region.wav.as_mut().unwrap().file_name = wav.file_name.clone();
-                    }
-                    region.index = region_index;
-                    regions.push(region);
-                    region_index += 1;
+                    region.wav.as_mut().unwrap().file_name = wav.file_name.clone();
                 }
+                region.index = region_index;
+                regions.push(region);
+                region_index += 1;
             }
         }
 
         // Audio Tracks
-        for block in track_blocks {
-            for b in &block.children {
-                if b.content_type == PTCD::AUDIO_Track_Name_Number as u16 {
-                    self.set_position(b.offset + 2);
-                    let name = self.parse_str()?;
+        for b in filter_blocks!(track_blocks.iter(), PTCD::AUDIO_Track_Name_Number) {
+            self.set_position(b.offset + 2);
+            let name = self.parse_str()?;
 
-                    self.increment_position(1);
-                    let num_channels = self.read_u32()? as usize;
+            self.increment_position(1);
+            let num_channels = self.read_u32()? as usize;
 
-                    for i in 0..num_channels {
-                        channel_map[i] = self.read_u16()?;
-                        if audio_tracks
-                            .iter()
-                            .find(|&t| t.index == channel_map[i])
-                            .is_none()
-                        {
-                            let track = Track {
-                                index: channel_map[i],
-                                name: name.clone(),
-                                ..Default::default()
-                            };
-                            audio_tracks.push(track);
-                        }
-                    }
-
+            for i in 0..num_channels {
+                channel_map[i] = self.read_u16()?;
+                if audio_tracks
+                    .iter()
+                    .find(|&t| t.index == channel_map[i])
+                    .is_none()
+                {
+                    let track = Track {
+                        index: channel_map[i],
+                        name: name.clone(),
+                        ..Default::default()
+                    };
+                    audio_tracks.push(track);
                 }
             }
         }
@@ -458,46 +471,33 @@ impl PtSessionParser {
                 Ok(PTCD::AUDIO_Region_Track_Full_Map_v8) => {
                     let mut count = 0;
 
-                    for a in &block.children {
-                        if a.content_type == 0x1052 {
-                            let track_name = self.parse_str_at(a.offset + 2)?;
-                            trace!("Mapping regions for track {}", track_name);
+                    for a in children_of!(block, 0x1052) {
+                        let track_name = self.parse_str_at(a.offset + 2)?;
+                        trace!("Mapping regions for track {}", track_name);
 
-                            for b in &a.children {
-                                if b.content_type == 0x1050 {
-                                    // Check if region is fade
-                                    if self.unxored()[b.offset + 46] == 0x01 {
-                                        continue;
+                        for b in children_of!(a, 0x1050) {
+                            // Check if region is fade
+                            if self.unxored()[b.offset + 46] == 0x01 {
+                                continue;
+                            }
+
+                            for c in children_of!(b, 0x104f) {
+                                self.set_position(c.offset + 4);
+                                let raw_index = self.read_u32()? as u16;
+                                self.increment_position(5);
+                                let start = self.read_u32()?;
+
+                                let track_index = count;
+                                if let Some(ref mut track) = audio_tracks.iter_mut().find(|t| t.index == track_index) {
+                                    if let Some(region) = regions.iter_mut().find(|r| r.index == raw_index) {
+                                        // start as f32 * rate_factor
+                                        region.start_pos = start as u64;
+                                        track.regions.push(region.clone());
                                     }
-
-                                    for c in &b.children {
-                                        if c.content_type == 0x104f {
-                                            self.set_position(c.offset + 4);
-                                            let raw_index = self.read_u32()? as u16;
-                                            self.increment_position(5);
-                                            let start = self.read_u32()?;
-
-                                            let track_index = count;
-                                            if let Some(ref mut track) = audio_tracks
-                                                .iter_mut()
-                                                .find(|t| t.index == track_index)
-                                            {
-                                                if let Some(region) = regions
-                                                    .iter_mut()
-                                                    .find(|r| r.index == raw_index)
-                                                {
-                                                    // start as f32 * rate_factor
-                                                    region.start_pos = start as u64;
-                                                    track.regions.push(region.clone());
-                                                }
-                                            }
-                                        }
-                                    }
-
                                 }
                             }
-                            count += 1;
                         }
+                        count += 1;
                     }
                 }
                 _ => {}
@@ -540,12 +540,7 @@ impl PtSessionParser {
         let marker_blocks = &block_map.as_ref().unwrap().marker_blocks;
         let mut markers = vec![];
 
-        for block in marker_blocks.iter()
-            .flat_map(|block| block.children.iter())
-            .filter(|block| block.content_type == PTCD::MARKER_List_Full as u16)
-            .flat_map(|block| block.children.iter())
-            .filter(|block| block.content_type == PTCD::MARKER_List_Entry as u16)
-        {
+        for block in filter_blocks!(marker_blocks.iter(), PTCD::MARKER_List_Full => PTCD::MARKER_List_Entry) {
             trace!("In Marker Entry");
             self.set_position(block.offset + 2);
             let index = self.read_u16()?;
