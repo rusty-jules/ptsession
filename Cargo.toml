@@ -1,13 +1,20 @@
 [package]
 name = "ptsession"
 version = "0.1.0"
-authors = ["Julian Aichholz <julian@reboundsound.la>"]
+authors = ["Julian Aichholz <julianaichholz@gmail.com>"]
 edition = "2018"
 
+[[bin]]
+name = "ptsession"
+src = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
+clap = { version = "4.5.34", features = ["derive"], optional = true }
+env_logger = { version = "*", optional = true }
 log = "0.4"
 serde = { version = "*", default-features = false, features = ["derive"] }
+serde_json = { version = "*", optional = true }
 
-[dev-dependencies]
-env_logger = "*"
-serde_json = "*"
+[features]
+cli = ["dep:clap", "dep:serde_json", "dep:env_logger"]
