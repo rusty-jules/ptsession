@@ -1,26 +1,44 @@
+mod cli;
 use clap::Parser;
+use cli::*;
+use oci_client::Reference;
 use ptsession::PtSession;
-use serde_json;
 use std::path::PathBuf;
 
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Whether to output json
-    #[arg(short, long, value_name = "json")]
-    json: Option<bool>,
-
-    /// The Pro Tools Session to Read
-    #[arg(value_name = "ptx")]
-    ptx_file: PathBuf,
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::init();
-    let cli = Args::parse();
+    let cli = Arguments::parse();
 
-    let session = PtSession::from(cli.ptx_file);
-    println!("{}", serde_json::to_string(&session)?);
+    match cli.command {
+        Some(command) => match command {
+            Commands::Push(args) => {
+                let (reference, session) = parse_args(&args.repository, &args.ptx_file)?;
+                cli::oras_push(reference, session, args).await?;
+            }
+            Commands::Pull { repository, .. } => {
+                //let (reference, session) = parse_args(repository, cli.ptx_file)?;
+                //cli::oras_pull(reference, session).await?;
+            }
+            Commands::Info { repository } => {
+                //let (reference, session) = parse_args(repository, cli.ptx_file)?;
+                //cli::oras_info(reference, session).await?;
+            }
+        },
+        None => {
+            //let session = PtSession::from(cli.ptx_file);
+            //println!("{}", serde_json::to_string(&session)?);
+        }
+    }
 
     Ok(())
+}
+
+fn parse_args(
+    repository: &String,
+    ptx_file: &PathBuf,
+) -> Result<(Reference, PtSession), Box<dyn std::error::Error + Send + Sync>> {
+    let reference: Reference = repository.parse()?;
+    let session = PtSession::from(ptx_file);
+    Ok((reference, session))
 }

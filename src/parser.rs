@@ -536,6 +536,7 @@ impl PtSessionParser {
     }
 
     fn parse_markers(&mut self) -> Result<Vec<Marker>, io::Error> {
+        return Ok(Vec::new());
         let block_map = self.block_map.take();
         let marker_blocks = &block_map.as_ref().unwrap().marker_blocks;
         let mut markers = vec![];

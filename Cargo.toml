@@ -7,14 +7,27 @@ edition = "2018"
 [[bin]]
 name = "ptsession"
 src = "src/main.rs"
-required-features = ["cli"]
+#required-features = ["cli"]
 
 [dependencies]
-clap = { version = "4.5.34", features = ["derive"], optional = true }
-env_logger = { version = "*", optional = true }
+clap = { version = "4.5.34", features = ["derive"] }
+env_logger = { version = "*" }
 log = "0.4"
 serde = { version = "*", default-features = false, features = ["derive"] }
-serde_json = { version = "*", optional = true }
+serde_json = { version = "*" }
+oci-client = { git = "https://github.com/oras-project/rust-oci-client", rev = "v0.14.0" }
+tempfile = "3.19.1"
+tokio = { version = "1.44.1", features = ["rt-multi-thread", "macros"] }
+indicatif = { version = "0.17.11", features = ["tokio"] }
+zstd = "0.13.3"
+sha2 = "0.10.8"
+tokio-util = "0.7.14"
+futures-util = "0.3.31"
+async-compression = { version = "0.4.22", features = ["tokio", "xz"] }
+reqwest = "0.12.15"
+maplit = "1.0.2"
+chrono = { version = "0.4.40", features = ["serde"] }
 
-[features]
-cli = ["dep:clap", "dep:serde_json", "dep:env_logger"]
+#[features]
+#cli = ["dep:clap", "dep:serde_json", "dep:env_logger"]
+#oras = ["cli", "dep:oci-client"]
