@@ -22,14 +22,6 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc::Sender;
 
-struct ProcessedBlob {
-    original_size: u64,
-    original_path: String,
-    original_digest: String,
-    compressed_digest: String,
-    size: u64,
-}
-
 // Stream that calculates digests while reading
 struct DigestReader<R> {
     inner: R,
@@ -379,7 +371,7 @@ async fn compress_and_upload_file(
     file_path: &str,
     compression_progress: ProgressBar,
     upload_progress: ProgressBar,
-) -> Result<ProcessedBlob, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
     // Create a shared http client wrapper for this operation
     let http_client = Arc::new(HttpClient::new(client));
     // Open the file
@@ -459,12 +451,26 @@ async fn compress_and_upload_file(
     // Mark progress bars as complete
     upload_progress.finish_with_message(format!("Upload complete {file_path}"));
 
-    Ok(ProcessedBlob {
-        original_size: file_size,
-        original_path: file_path.to_string(),
-        original_digest,
-        compressed_digest,
-        size: compressed_size,
+    // Output OciDescriptor of the layer
+    let annotations = maplit::btreemap! {
+        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.to_string(),
+        "io.ptsession.original.digest".to_string() => original_digest,
+        "io.ptsession.original.size".to_string() => file_size.to_string(),
+        "io.ptsession.compressed.digest".to_string() => compressed_digest.clone(),
+        "io.deis.oras.content.unpack".to_string() => "true".to_string()
+    };
+
+    let media_type = match compression {
+        Compression::None => "audio/vnd.wav".to_string(),
+        _ => format!("audio/vnd.wav+{}", compression.to_string()),
+    };
+
+    Ok(OciDescriptor {
+        urls: None,
+        digest: compressed_digest,
+        size: file_size as i64,
+        media_type,
+        annotations: Some(annotations),
     })
 }
 
@@ -514,10 +520,7 @@ pub async fn oras_push(
     // Process all files in parallel with progress reporting
     println!("Processing audio files with parallelism: {}", parallelism);
 
-    // Process files in chunks to control parallelism
-    //let mut processed_files = Vec::new();
-
-    let processed_files = futures_util::stream::iter(file_names)
+    let layers: Vec<OciDescriptor> = futures_util::stream::iter(file_names)
         .map(|file_path| {
             let client = client.clone();
             let reference = reference.clone();
@@ -551,38 +554,8 @@ pub async fn oras_push(
             }
         })
         .buffer_unordered(parallelism) // Process up to parallelism files at a time
-        .try_collect::<Vec<_>>() // Collect the results
+        .try_collect() // Collect the results
         .await?;
-
-    // Create layers for all processed files
-    let layers: Vec<OciDescriptor> = processed_files
-        .into_iter()
-        .map(|file| {
-            //let file_name = Path::new(&file.original_path).to_string_lossy().to_string();
-            // Create annotations for this layer
-            let annotations = maplit::btreemap! {
-                ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file.original_path,
-                "io.ptsession.original.digest".to_string() => file.original_digest.clone(),
-                "io.ptsession.original.size".to_string() => file.original_size.to_string(),
-                "io.ptsession.compressed.digest".to_string() => file.compressed_digest.clone(),
-                "io.deis.oras.content.unpack".to_string() => "true".to_string()
-            };
-
-            // Set mediaType
-            let media_type = match compression {
-                Compression::None => "audio/vnd.wav".to_string(),
-                _ => format!("audio/vnd.wav+{}", compression.to_string()),
-            };
-
-            OciDescriptor {
-                urls: None,
-                digest: file.compressed_digest,
-                size: file.size as i64,
-                media_type,
-                annotations: Some(annotations),
-            }
-        })
-        .collect();
 
     println!("Creating manifest for {} layers", layers.len());
     let ptx_filename = ptx_file.file_name().unwrap().to_string_lossy().to_string();
