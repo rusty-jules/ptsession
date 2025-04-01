@@ -3,7 +3,7 @@ use clap::Parser;
 use cli::*;
 use oci_client::Reference;
 use ptsession::PtSession;
-use std::path::PathBuf;
+use std::str::FromStr;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -11,34 +11,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Arguments::parse();
 
     match cli.command {
-        Some(command) => match command {
-            Commands::Push(args) => {
-                let (reference, session) = parse_args(&args.repository, &args.ptx_file)?;
-                cli::oras_push(reference, session, args).await?;
-            }
-            Commands::Pull { repository, .. } => {
-                //let (reference, session) = parse_args(repository, cli.ptx_file)?;
-                //cli::oras_pull(reference, session).await?;
-            }
-            Commands::Info { repository } => {
-                //let (reference, session) = parse_args(repository, cli.ptx_file)?;
-                //cli::oras_info(reference, session).await?;
-            }
-        },
-        None => {
-            //let session = PtSession::from(cli.ptx_file);
-            //println!("{}", serde_json::to_string(&session)?);
+        Commands::Push(args) => {
+            cli::oras_push(
+                Reference::from_str(&args.repository)?,
+                PtSession::from(&args.ptx_file),
+                args,
+            )
+            .await?
         }
+        Commands::Pull(args) => {}
+        Commands::Info(args) => cli::info(args).await?,
     }
 
     Ok(())
-}
-
-fn parse_args(
-    repository: &String,
-    ptx_file: &PathBuf,
-) -> Result<(Reference, PtSession), Box<dyn std::error::Error + Send + Sync>> {
-    let reference: Reference = repository.parse()?;
-    let session = PtSession::from(ptx_file);
-    Ok((reference, session))
 }

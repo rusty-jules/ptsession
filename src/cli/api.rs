@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct Arguments {
     /// Subcommand
     #[command(subcommand)]
-    pub command: Option<Commands>,
+    pub command: Commands,
 
     #[command(flatten)]
     global_opts: GlobalOpts,
@@ -16,8 +16,8 @@ pub struct Arguments {
 #[derive(Debug, Args)]
 pub struct GlobalOpts {
     /// Whether to output json
-    #[arg(short, long, value_name = "json")]
-    pub json: Option<bool>,
+    #[arg(short, long, action, value_name = "json")]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -32,7 +32,7 @@ pub struct PushArgs {
 
     /// Ignore missing session files
     // TODO: make exclusive with arguments below
-    #[arg(short, long, default_value_t = false, value_name = "ignore-missing")]
+    #[arg(short, long, action, value_name = "ignore-missing")]
     ignore_missing: bool,
 
     /// File paths to search for files in
@@ -60,21 +60,35 @@ pub struct PushArgs {
     pub parallelism: usize,
 }
 
+#[derive(Debug, Args)]
+pub struct PullArgs {
+    #[arg(value_name = "repository")]
+    repository: String,
+
+    #[arg(value_name = "decompress")]
+    decompress: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InfoArgs {
+    /// File path or OCI artifact reference (image url) to pro tools session
+    #[arg(value_name = "ptx file or oci reference")]
+    pub file: String,
+
+    /// Pretty print json
+    #[arg(short, long, default_value_t = false)]
+    pub pretty: bool,
+}
+
 #[derive(Subcommand)]
 #[command(version, about, long_about = None)]
 pub enum Commands {
+    /// Push a pro tools session and its audio files to an oci repository as an oras artifact
     Push(PushArgs),
-    Pull {
-        #[arg(value_name = "repository")]
-        repository: String,
-
-        #[arg(value_name = "decompress")]
-        decompress: bool,
-    },
-    Info {
-        #[arg(value_name = "repository")]
-        repository: String,
-    },
+    /// Pull a pro tools session from an oci repository
+    Pull(PullArgs),
+    /// Print info of a local or remote pro tools session
+    Info(InfoArgs),
 }
 
 #[derive(Clone, clap::ValueEnum, Default, Debug, Serialize)]
