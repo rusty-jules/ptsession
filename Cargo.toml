@@ -20,7 +20,7 @@ tempfile = "3.19.1"
 tokio = { version = "1.44.1", features = ["rt-multi-thread", "macros"] }
 indicatif = { version = "0.17.11", features = ["tokio"] }
 sha2 = "0.10.8"
-tokio-util = "0.7.14"
+tokio-util = { version = "0.7.14", features = ["compat", "futures-util", "io", "io-util"] }
 futures-util = "0.3.31"
 async-compression = { version = "0.4.22", features = ["gzip", "tokio", "xz", "zstd"] }
 reqwest = "0.12.15"

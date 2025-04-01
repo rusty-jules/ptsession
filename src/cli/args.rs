@@ -1,6 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::{convert::TryFrom, path::PathBuf};
+
+use super::MediaType;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -55,18 +57,28 @@ pub struct PushArgs {
     #[arg(short, long, default_value_t = Compression::XZ, value_name = "compression")]
     pub compression: Compression,
 
-    /// Maximum number of uploads
+    /// Maximum number of concurrent uploads
     #[arg(short, long, default_value_t = 5, value_name = "parallelism")]
     pub parallelism: usize,
 }
 
 #[derive(Debug, Args)]
 pub struct PullArgs {
+    /// OCI repository to pull from
     #[arg(value_name = "repository")]
-    repository: String,
+    pub repository: String,
 
-    #[arg(value_name = "decompress")]
-    decompress: bool,
+    /// Whether to decompress files
+    #[arg(short, long, default_value_t = true, value_name = "decompress")]
+    pub decompress: bool,
+
+    /// The directory to pull files into, will be created if it does not exist
+    #[arg(short, long, value_name = "target-dir")]
+    pub target_dir: Option<PathBuf>,
+
+    /// Maximum number of concurrent downloads
+    #[arg(short, long, default_value_t = 5, value_name = "parallelism")]
+    pub parallelism: usize,
 }
 
 #[derive(Debug, Args)]
@@ -109,10 +121,26 @@ impl ToString for Compression {
     fn to_string(&self) -> String {
         match self {
             Compression::XZ => "xz",
-            Compression::ZSTD => "zst",
+            Compression::ZSTD => "zstd",
             Compression::GZIP => "gzip",
             Compression::None => "none",
         }
         .to_string()
+    }
+}
+
+impl<'a> TryFrom<MediaType<'a>> for Compression {
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn try_from(value: MediaType) -> Result<Self, Self::Error> {
+        Ok(match value.split_once('+') {
+            None => Compression::None,
+            Some((_, compression_str)) => match compression_str {
+                "xz" => Compression::XZ,
+                "zst" | "zstd" => Compression::ZSTD,
+                "gz" | "gzip" => Compression::GZIP,
+                other => Err(format!("Unsupported compression algorithm: {other}"))?,
+            },
+        })
     }
 }

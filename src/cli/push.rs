@@ -1,4 +1,5 @@
-use super::{Compression, PushArgs};
+use super::annotations::*;
+use super::{Compression, HttpClient, PushArgs};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -94,6 +95,7 @@ impl<W: AsyncWrite + Unpin> DigestWriter<W> {
         format!("sha256:{:x}", self.hasher.clone().finalize())
     }
 
+    #[allow(unused)]
     fn size(&self) -> u64 {
         *self.size.lock().unwrap()
     }
@@ -132,36 +134,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DigestWriter<W> {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-struct HttpClient {
-    client: reqwest::Client,
-}
-
-impl HttpClient {
-    fn new(_oci_client: &oci_client::Client) -> Self {
-        let client = reqwest::Client::builder()
-            //.connection_verbose(true) // Enables detailed connection info for debugging
-            .pool_idle_timeout(Some(std::time::Duration::from_secs(300))) // Keep connections alive
-            .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
-            .pool_max_idle_per_host(32) // Allow plenty of idle connections
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
-        Self { client }
-    }
-
-    async fn post(&self, url: &str) -> reqwest::RequestBuilder {
-        self.client.post(url)
-    }
-
-    async fn patch(&self, url: &str) -> reqwest::RequestBuilder {
-        self.client.patch(url)
-    }
-
-    async fn put(&self, url: reqwest::Url) -> reqwest::RequestBuilder {
-        self.client.put(url)
     }
 }
 
@@ -425,7 +397,7 @@ async fn compress_and_upload_file(
     upload_progress: ProgressBar,
 ) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
     // Create a shared http client wrapper for this operation
-    let http_client = Arc::new(HttpClient::new(client));
+    let http_client = HttpClient::new(client);
     // Open the file
     let file = File::open(file_path).await?;
 
@@ -518,10 +490,10 @@ async fn compress_and_upload_file(
     // Output OciDescriptor of the layer
     let annotations = maplit::btreemap! {
         ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.to_string(),
-        "io.ptsession.original.digest".to_string() => original_digest,
-        "io.ptsession.original.size".to_string() => file_size.to_string(),
-        "io.ptsession.compressed.digest".to_string() => compressed_digest.clone(),
-        "io.deis.oras.content.unpack".to_string() => "true".to_string()
+        IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
+        IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
+        IO_PTSESSION_COMPRESSED_DIGEST.to_string() => compressed_digest.clone(),
+        IO_DEIS_ORAS_CONTENT_UNPACK.to_string() => "true".to_string()
     };
 
     let media_type = match compression {
@@ -538,7 +510,7 @@ async fn compress_and_upload_file(
     })
 }
 
-pub async fn oras_push(
+pub async fn push(
     reference: Reference,
     session: PtSession,
     PushArgs {
@@ -570,7 +542,7 @@ pub async fn oras_push(
     let auth = RegistryAuth::Anonymous;
 
     // Create a multi-progress bar
-    let multi_progress = Arc::new(MultiProgress::new());
+    let multi_progress = MultiProgress::new();
 
     // Setup progress styles
     let compression_style = ProgressStyle::default_bar()
@@ -639,7 +611,7 @@ pub async fn oras_push(
     let config_annotations = maplit::btreemap! {
         ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename.clone(),
         ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => ptx_created,
-        "io.ptsession.sample_rate".to_string() => session.session_sample_rate.to_string(),
+        IO_PTSESSION_SAMPLE_RATE.to_string() => session.session_sample_rate.to_string(),
     };
     let manifest_annotations = maplit::btreemap! {
         ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename,

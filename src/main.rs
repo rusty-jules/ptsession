@@ -1,4 +1,5 @@
 mod cli;
+
 use clap::Parser;
 use cli::*;
 use oci_client::Reference;
@@ -12,15 +13,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     match cli.command {
         Commands::Push(args) => {
-            cli::oras_push(
+            push(
                 Reference::from_str(&args.repository)?,
                 PtSession::from(&args.ptx_file),
                 args,
             )
             .await?
         }
-        Commands::Pull(args) => {}
-        Commands::Info(args) => cli::info(args).await?,
+        Commands::Pull(args) => pull(Reference::from_str(&args.repository)?, args).await?,
+        Commands::Info(args) => info(args).await?,
     }
 
     Ok(())
