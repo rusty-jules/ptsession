@@ -83,7 +83,7 @@ pub enum Compression {
     /// Compress files to `.xz` format
     #[default]
     XZ,
-    /// Compress files to `.zstd` format
+    /// Compress files to `.zst` format
     ZSTD,
     /// Compress files to `.gz` format
     GZIP,
@@ -95,7 +95,7 @@ impl ToString for Compression {
     fn to_string(&self) -> String {
         match self {
             Compression::XZ => "xz",
-            Compression::ZSTD => "zstd",
+            Compression::ZSTD => "zst",
             Compression::GZIP => "gzip",
             Compression::None => "none",
         }

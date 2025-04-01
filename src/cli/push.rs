@@ -1,11 +1,12 @@
 use super::{Compression, PushArgs};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use async_compression::tokio::write::XzEncoder;
+use async_compression::tokio::write::{GzipEncoder, XzEncoder, ZstdEncoder};
 use futures_util::{StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::manifest::OciDescriptor;
@@ -302,15 +303,65 @@ async fn end_push_chunked_session(
     }
 }
 
+enum CompressorEncoder<W: AsyncWrite + Unpin + Send> {
+    XZ(XzEncoder<DigestWriter<W>>),
+    ZSTD(ZstdEncoder<DigestWriter<W>>),
+    GZIP(GzipEncoder<DigestWriter<W>>),
+    //None,
+}
+
+struct Compressor<W: AsyncWrite + Unpin + Send + Sync> {
+    encoder: CompressorEncoder<W>,
+}
+
+impl<W: AsyncWrite + Unpin + Send + Sync> Compressor<W> {
+    fn into_inner(self) -> DigestWriter<W> {
+        match self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder.into_inner(),
+            CompressorEncoder::ZSTD(encoder) => encoder.into_inner(),
+            CompressorEncoder::GZIP(encoder) => encoder.into_inner(),
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin + Send + Sync + 'static> Deref for Compressor<W> {
+    type Target = dyn AsyncWrite + Unpin + Send + Sync;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder,
+            CompressorEncoder::ZSTD(encoder) => encoder,
+            CompressorEncoder::GZIP(encoder) => encoder,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin + Send + Sync + 'static> DerefMut for Compressor<W> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder,
+            CompressorEncoder::ZSTD(encoder) => encoder,
+            CompressorEncoder::GZIP(encoder) => encoder,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin + Send + Sync> Compressor<W> {
+    fn get_mut(&mut self) -> &mut DigestWriter<W> {
+        match &mut self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder.get_mut(),
+            CompressorEncoder::ZSTD(encoder) => encoder.get_mut(),
+            CompressorEncoder::GZIP(encoder) => encoder.get_mut(),
+        }
+    }
+}
+
 async fn compress_blob<R: AsyncRead + Unpin>(
     file_name: String,
-    mut xz_encoder: XzEncoder<DigestWriter<Vec<u8>>>,
+    mut encoder: Compressor<Vec<u8>>,
     mut digest_reader: DigestReader<R>,
     compressed_tx: Sender<Vec<u8>>,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-    //let mut xz_encoder = xz_encoder;
-    //let mut digest_reader = digest_reader;
-
     // Create buffer for reading
     let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer
 
@@ -322,16 +373,16 @@ async fn compress_blob<R: AsyncRead + Unpin>(
         }
 
         // Write to encoder
-        xz_encoder.write_all(&buffer[..n]).await?;
+        encoder.write_all(&buffer[..n]).await?;
 
         // Periodically flush to get compressed chunks
         if n == buffer.len() {
             // This is likely a full buffer, so there might be more data coming
-            xz_encoder.flush().await?;
+            encoder.flush().await?;
 
             // Extract compressed data
-            let inner_writer = xz_encoder.get_mut();
-            let chunk = std::mem::replace(&mut inner_writer.inner, Vec::new());
+            let inner_writer = encoder.get_mut();
+            let chunk = std::mem::replace(&mut inner_writer.inner, Vec::with_capacity(64 * 1024));
 
             if !chunk.is_empty() {
                 compressed_tx
@@ -343,10 +394,10 @@ async fn compress_blob<R: AsyncRead + Unpin>(
     }
 
     // Finish the compression
-    xz_encoder.shutdown().await?;
+    encoder.shutdown().await?;
 
     // Get the final compressed data
-    let inner_writer = xz_encoder.into_inner();
+    let inner_writer = encoder.into_inner();
     let compressed_digest = inner_writer.digest();
     let final_chunk = inner_writer.inner;
 
@@ -369,6 +420,7 @@ async fn compress_and_upload_file(
     client: &oci_client::Client,
     reference: &Reference,
     file_path: &str,
+    compression: &Compression,
     compression_progress: ProgressBar,
     upload_progress: ProgressBar,
 ) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
@@ -393,13 +445,25 @@ async fn compress_and_upload_file(
     let digest_writer = DigestWriter::new(buffer);
     let compressed_size_tracker = digest_writer.size_tracker();
 
-    // Create XZ encoder with digest writer
-    let xz_encoder = XzEncoder::new(digest_writer);
+    // Create compression encoder with digest writer
+    let encoder: Compressor<_> = match compression {
+        Compression::XZ => Compressor {
+            encoder: CompressorEncoder::XZ(XzEncoder::new(digest_writer)),
+        },
+        Compression::ZSTD => Compressor {
+            encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(digest_writer)),
+        },
+        // FIXME: add None
+        _ => Compressor {
+            encoder: CompressorEncoder::GZIP(GzipEncoder::new(digest_writer)),
+        },
+    };
+    //let xz_encoder = XzEncoder::new(digest_writer);
 
     // Spawn task to compress the file
     let compression_task = tokio::spawn(compress_blob(
         file_path.to_string(),
-        xz_encoder,
+        encoder,
         digest_reader,
         compressed_tx,
     ));
@@ -527,6 +591,7 @@ pub async fn oras_push(
             let multi_progress = multi_progress.clone();
             let compression_style = compression_style.clone();
             let upload_style = upload_style.clone();
+            let compression = compression.clone();
 
             async move {
                 let file_name = Path::new(&file_path).to_string_lossy().to_string();
@@ -545,6 +610,7 @@ pub async fn oras_push(
                     &client,
                     &reference,
                     &file_path,
+                    &compression,
                     compression_progress,
                     upload_progress,
                 )
