@@ -90,6 +90,25 @@ pub struct InfoArgs {
     /// Pretty print json
     #[arg(short, long, default_value_t = false)]
     pub pretty: bool,
+
+    #[command(flatten)]
+    pub print: InfoPrintArgs,
+}
+
+#[derive(Debug, Args)]
+#[group(multiple = false)]
+pub struct InfoPrintArgs {
+    /// Output text
+    #[arg(short, long, action)]
+    pub text: bool,
+
+    /// Output table
+    #[arg(short, long, action)]
+    pub table: bool,
+
+    /// Output json
+    #[arg(short, long, action)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]

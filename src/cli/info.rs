@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use indicatif::HumanBytes;
 use oci_client::{
     client::{Client, ClientConfig, ClientProtocol},
     secrets::RegistryAuth,
@@ -14,12 +15,36 @@ fn print_ptx(
     ptsession: PtSession,
     args: &InfoArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let json = if args.pretty {
-        serde_json::to_string_pretty(&ptsession)?
-    } else {
-        serde_json::to_string(&ptsession)?
-    };
-    println!("{json}");
+    if args.print.text {
+        println!("Version: {}", ptsession.version);
+        println!("Sample Rate: {}", ptsession.session_sample_rate);
+        println!("Audio Files: {}", ptsession.audio_files.len());
+        let total_size = ptsession
+            .audio_files
+            .iter()
+            .map(|wav| {
+                let mut path = PathBuf::from("Audio Files");
+                path.push(&wav.file_name);
+                std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+            })
+            .fold(0, |acc, size| acc + size);
+        println!("Total Size: {}", HumanBytes(total_size as u64));
+        println!("File Names:");
+        ptsession
+            .audio_files
+            .iter()
+            .map(|wav| wav.file_name.as_str())
+            .for_each(|name| println!("  {name}"));
+    } else if args.print.json {
+        let json = if args.pretty {
+            serde_json::to_string_pretty(&ptsession)?
+        } else {
+            serde_json::to_string(&ptsession)?
+        };
+        println!("{json}");
+    } else if args.print.table {
+        println!("not supported");
+    }
     Ok(())
 }
 
