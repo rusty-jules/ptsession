@@ -302,9 +302,15 @@ async fn compress_and_upload(
     // Open the file
     let file = File::open(file_path).await?;
 
-    // Get file size
-    let file_size = file.metadata().await?.len();
+    // Get file meta
+    let file_meta = file.metadata().await?;
+    let file_size = file_meta.len();
     compression_progress.set_length(file_size);
+
+    // Get file timestamp
+    let file_created = chrono::DateTime::from_timestamp(file_meta.ctime(), 0)
+        .ok_or("could not determine file timestamp")?
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     // Create digest reader to calculate original file digest
     let digest_reader = DigestReader::new(BufReader::new(file), None);
@@ -361,6 +367,7 @@ async fn compress_and_upload(
     // Output OciDescriptor of the layer
     let annotations = maplit::btreemap! {
         ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.to_string(),
+        ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => file_created,
         IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
         IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
         IO_DEIS_ORAS_CONTENT_UNPACK.to_string() => "true".to_string()
