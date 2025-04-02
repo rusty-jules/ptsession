@@ -26,6 +26,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc::Sender;
 
+const BUF_CAPACITY: usize = 64 * 1024; // 64KB
+
 // Stream that calculates digests while reading
 struct DigestReader<R> {
     inner: R,
@@ -78,6 +80,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for DigestReader<R> {
     }
 }
 
+/// Stream that calculates digest while writing
 struct DigestWriter<W> {
     inner: W,
     hasher: Sha256,
@@ -136,6 +139,97 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DigestWriter<W> {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+enum CompressorEncoder<W: AsyncWrite + Unpin + Send> {
+    XZ(XzEncoder<DigestWriter<W>>),
+    ZSTD(ZstdEncoder<DigestWriter<W>>),
+    GZIP(GzipEncoder<DigestWriter<W>>),
+    None(DigestWriter<W>),
+}
+
+struct Compressor<W>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    encoder: CompressorEncoder<W>,
+}
+
+impl<W> Compressor<W>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    fn into_inner(self) -> DigestWriter<W> {
+        match self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder.into_inner(),
+            CompressorEncoder::ZSTD(encoder) => encoder.into_inner(),
+            CompressorEncoder::GZIP(encoder) => encoder.into_inner(),
+            CompressorEncoder::None(encoder) => encoder,
+        }
+    }
+}
+
+impl<W> Deref for Compressor<W>
+where
+    W: AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    type Target = dyn AsyncWrite + Unpin + Send + Sync;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder,
+            CompressorEncoder::ZSTD(encoder) => encoder,
+            CompressorEncoder::GZIP(encoder) => encoder,
+            CompressorEncoder::None(encoder) => encoder,
+        }
+    }
+}
+
+impl<W> DerefMut for Compressor<W>
+where
+    W: AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder,
+            CompressorEncoder::ZSTD(encoder) => encoder,
+            CompressorEncoder::GZIP(encoder) => encoder,
+            CompressorEncoder::None(encoder) => encoder,
+        }
+    }
+}
+
+impl<W> Compressor<W>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    fn get_mut(&mut self) -> &mut DigestWriter<W> {
+        match &mut self.encoder {
+            CompressorEncoder::XZ(encoder) => encoder.get_mut(),
+            CompressorEncoder::ZSTD(encoder) => encoder.get_mut(),
+            CompressorEncoder::GZIP(encoder) => encoder.get_mut(),
+            CompressorEncoder::None(encoder) => encoder,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin + Send + Sync> From<(Compression, DigestWriter<W>)> for Compressor<W> {
+    fn from((compression, writer): (Compression, DigestWriter<W>)) -> Self {
+        match compression {
+            Compression::XZ => Self {
+                encoder: CompressorEncoder::XZ(XzEncoder::new(writer)),
+            },
+            Compression::ZSTD => Self {
+                encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(writer)),
+            },
+            Compression::GZIP => Self {
+                encoder: CompressorEncoder::GZIP(GzipEncoder::new(writer)),
+            },
+            Compression::None => Self {
+                encoder: CompressorEncoder::None(writer),
+            },
+        }
     }
 }
 
@@ -277,59 +371,6 @@ async fn end_push_chunked_session(
     }
 }
 
-enum CompressorEncoder<W: AsyncWrite + Unpin + Send> {
-    XZ(XzEncoder<DigestWriter<W>>),
-    ZSTD(ZstdEncoder<DigestWriter<W>>),
-    GZIP(GzipEncoder<DigestWriter<W>>),
-    //None,
-}
-
-struct Compressor<W: AsyncWrite + Unpin + Send + Sync> {
-    encoder: CompressorEncoder<W>,
-}
-
-impl<W: AsyncWrite + Unpin + Send + Sync> Compressor<W> {
-    fn into_inner(self) -> DigestWriter<W> {
-        match self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder.into_inner(),
-            CompressorEncoder::ZSTD(encoder) => encoder.into_inner(),
-            CompressorEncoder::GZIP(encoder) => encoder.into_inner(),
-        }
-    }
-}
-
-impl<W: AsyncWrite + Unpin + Send + Sync + 'static> Deref for Compressor<W> {
-    type Target = dyn AsyncWrite + Unpin + Send + Sync;
-
-    fn deref(&self) -> &Self::Target {
-        match &self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder,
-            CompressorEncoder::ZSTD(encoder) => encoder,
-            CompressorEncoder::GZIP(encoder) => encoder,
-        }
-    }
-}
-
-impl<W: AsyncWrite + Unpin + Send + Sync + 'static> DerefMut for Compressor<W> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match &mut self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder,
-            CompressorEncoder::ZSTD(encoder) => encoder,
-            CompressorEncoder::GZIP(encoder) => encoder,
-        }
-    }
-}
-
-impl<W: AsyncWrite + Unpin + Send + Sync> Compressor<W> {
-    fn get_mut(&mut self) -> &mut DigestWriter<W> {
-        match &mut self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder.get_mut(),
-            CompressorEncoder::ZSTD(encoder) => encoder.get_mut(),
-            CompressorEncoder::GZIP(encoder) => encoder.get_mut(),
-        }
-    }
-}
-
 async fn compress_blob<R: AsyncRead + Unpin>(
     file_name: String,
     mut encoder: Compressor<Vec<u8>>,
@@ -390,11 +431,11 @@ async fn compress_blob<R: AsyncRead + Unpin>(
     Ok((compressed_digest, digest_reader.digest()))
 }
 
-async fn compress_and_upload_file(
+async fn compress_and_upload(
     client: &oci_client::Client,
     reference: &Reference,
     file_path: &str,
-    compression: &Compression,
+    compression: Compression,
     compression_progress: ProgressBar,
     upload_progress: ProgressBar,
 ) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
@@ -420,19 +461,7 @@ async fn compress_and_upload_file(
     let compressed_size_tracker = digest_writer.size_tracker();
 
     // Create compression encoder with digest writer
-    let encoder: Compressor<_> = match compression {
-        Compression::XZ => Compressor {
-            encoder: CompressorEncoder::XZ(XzEncoder::new(digest_writer)),
-        },
-        Compression::ZSTD => Compressor {
-            encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(digest_writer)),
-        },
-        // FIXME: add None
-        _ => Compressor {
-            encoder: CompressorEncoder::GZIP(GzipEncoder::new(digest_writer)),
-        },
-    };
-    //let xz_encoder = XzEncoder::new(digest_writer);
+    let encoder: Compressor<_> = Compressor::from((compression, digest_writer));
 
     // Spawn task to compress the file
     let compression_task = tokio::spawn(compress_blob(
@@ -445,9 +474,6 @@ async fn compress_and_upload_file(
     // Start the upload session
     let mut location = begin_push_chunked_session(&http_client, reference).await?;
     let mut start_byte = 0;
-
-    // Pass the HTTP client wrapper to functions that need it
-    //let http_client_ref = http_client.clone();
 
     // Set up upload progress bar
     upload_progress.set_message(format!("Uploading {file_path}"));
@@ -565,7 +591,6 @@ pub async fn push(
             let multi_progress = multi_progress.clone();
             let compression_style = compression_style.clone();
             let upload_style = upload_style.clone();
-            let compression = compression.clone();
 
             async move {
                 let file_name = Path::new(&file_path).to_string_lossy().to_string();
@@ -580,11 +605,11 @@ pub async fn push(
                 upload_progress.set_message(format!("Uploading {}", file_name));
 
                 // Process the file
-                let result = compress_and_upload_file(
+                let result = compress_and_upload(
                     &client,
                     &reference,
                     &file_path,
-                    &compression,
+                    compression,
                     compression_progress,
                     upload_progress,
                 )

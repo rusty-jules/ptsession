@@ -122,7 +122,7 @@ pub enum Commands {
     Info(InfoArgs),
 }
 
-#[derive(Clone, clap::ValueEnum, Default, Debug, Serialize)]
+#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Compression {
     /// Compress files to `.xz` format

@@ -17,11 +17,13 @@ All features of [ptformat] except for MIDI parsing are supported. Support for Ma
 - [ ] File search with tagging cache, parallelism, and reporting (split off with filter)
 - [ ] File search depth argument (-B num directories above, -A num dirs below, -C num dirs around (above and below))
 - [ ] Non-TUI progress (json/text logging)
-- [ ] Upload / Download retries (wrap httpclient)
+- [ ] Upload / Download retries ([reqwest_retry_middleware][middleware])
 - [ ] Better errors (like could not find file)
 - [ ] Save date created/modified annotations for sessions & files
 - [ ] Compress sessions
 - [ ] Upload pro tools originiator id's as annotations for finding files in other sessions
+
+[middleware]: https://docs.rs/reqwest-retry/latest/reqwest_retry/
 
 ## Nice to Haves
 - [ ] Additive pushing function for finding files with multiple methods
