@@ -5,7 +5,7 @@ use crate::client::HttpClient;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -320,7 +320,7 @@ async fn compress_and_upload(
     let original_digest_hasher = digest_reader.digest_handle();
     // Read the file into memory and compute the digest
     let mut buf = Vec::with_capacity(file_size as usize);
-    tokio::io::copy(&mut digest_reader, &mut buf).await?;
+    digest_reader.read_to_end(&mut buf).await?;
     let original_digest = original_digest_hasher.lock().unwrap().clone().finalize();
     if let Some(descriptor) = pushed_digests.get(&format!("sha256:{:x}", original_digest)) {
         compression_progress.finish_with_message(format!("Exists {file_path}"));
@@ -399,6 +399,96 @@ async fn compress_and_upload(
     })
 }
 
+async fn fetch_original_digests(
+    client: &oci_client::Client,
+    reference: &Reference,
+    auth: &RegistryAuth,
+) -> Result<BTreeMap<String, OciDescriptor>, Box<dyn std::error::Error + Send + Sync>> {
+    let tags = client.list_tags(&reference, &auth, None, None).await?;
+    futures_util::stream::iter(tags.tags.into_iter())
+        .map(|tag| {
+            let a = auth.clone();
+            let c = client.clone();
+            let r = reference.clone();
+
+            async move {
+                let reference =
+                    Reference::with_tag(r.registry().to_string(), r.repository().to_string(), tag);
+                let (manifest, _) = c.pull_image_manifest(&reference, &a).await?;
+                let digests = manifest
+                    .layers
+                    .into_iter()
+                    .filter_map(|layer| match &layer.annotations {
+                        None => None,
+                        Some(annotations) => match annotations.get(IO_PTSESSION_ORIGINAL_DIGEST) {
+                            None => None,
+                            Some(digest) => Some((digest.clone(), layer)),
+                        },
+                    })
+                    .collect::<BTreeMap<String, OciDescriptor>>();
+                Ok::<_, Box<dyn ::std::error::Error + Sync + Send>>(digests)
+            }
+        })
+        .buffer_unordered(10)
+        .try_concat()
+        .await
+}
+
+async fn push_manifest(
+    client: &oci_client::Client,
+    reference: &Reference,
+    auth: &RegistryAuth,
+    layers: Vec<OciDescriptor>,
+    session: PtSession,
+    ptx_file: PathBuf,
+) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
+    let mut ptx = File::open(&ptx_file).await?;
+    let ptx_meta = ptx.metadata().await?;
+    let mut ptx_data = Vec::with_capacity(ptx_meta.len() as usize);
+    ptx.read_to_end(&mut ptx_data).await?;
+    drop(ptx);
+
+    let ptx_filename = ptx_file.file_name().unwrap().to_string_lossy().to_string();
+
+    let config = Config {
+        data: ptx_data,
+        media_type: "application/vnd.avid.ptx".to_string(),
+        annotations: Some(maplit::btreemap! {
+            IO_PTSESSION_SAMPLE_RATE.to_string() => session.session_sample_rate.to_string(),
+            ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename.clone(),
+            ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => chrono::DateTime::from_timestamp(ptx_meta.ctime(), 0)
+                .ok_or("could not determine ptx file timestamp")?
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
+    };
+
+    let manifest = OciImageManifest {
+        schema_version: 2,
+        media_type: Some(OCI_IMAGE_MEDIA_TYPE.to_string()),
+        artifact_type: Some("application/vnd.avid.ptsession".to_string()),
+        config: OciDescriptor {
+            size: ptx_meta.len() as i64,
+            media_type: config.media_type.clone(),
+            digest: config.sha256_digest(),
+            annotations: config.annotations.clone(),
+            ..Default::default()
+        },
+        layers,
+        annotations: Some(maplit::btreemap! {
+            ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename,
+            ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => chrono::Local::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
+    };
+
+    println!("Pushing manifest...");
+    let res: PushResponse = client
+        .push(reference, &[], config, auth, Some(manifest))
+        .await?;
+    println!("Push completed. Manifest URL: {}", res.manifest_url);
+    Ok(())
+}
+
 pub async fn push(
     reference: Reference,
     session: PtSession,
@@ -443,40 +533,7 @@ pub async fn push(
         .unwrap();
 
     // fetch all original digests
-    let tags = client.list_tags(&reference, &auth, None, None).await?;
-    let original_digests: BTreeMap<String, OciDescriptor> =
-        futures_util::stream::iter(tags.tags.into_iter())
-            .map(|tag| {
-                let a = auth.clone();
-                let c = client.clone();
-                let r = reference.clone();
-
-                async move {
-                    let reference = Reference::with_tag(
-                        r.registry().to_string(),
-                        r.repository().to_string(),
-                        tag,
-                    );
-                    let (manifest, _) = c.pull_image_manifest(&reference, &a).await?;
-                    let digests = manifest
-                        .layers
-                        .into_iter()
-                        .filter_map(|layer| match &layer.annotations {
-                            None => None,
-                            Some(annotations) => {
-                                match annotations.get(IO_PTSESSION_ORIGINAL_DIGEST) {
-                                    None => None,
-                                    Some(digest) => Some((digest.clone(), layer)),
-                                }
-                            }
-                        })
-                        .collect::<BTreeMap<String, OciDescriptor>>();
-                    Ok::<_, Box<dyn ::std::error::Error + Sync + Send>>(digests)
-                }
-            })
-            .buffer_unordered(10)
-            .try_concat()
-            .await?;
+    let original_digests = fetch_original_digests(&client, &reference, &auth).await?;
 
     // Process all files in parallel with progress reporting
     println!("Processing audio files with parallelism: {}", parallelism);
@@ -522,52 +579,7 @@ pub async fn push(
         .await?;
 
     println!("Creating manifest for {} layers", layers.len());
-    let ptx_filename = ptx_file.file_name().unwrap().to_string_lossy().to_string();
-    let mut ptx = File::open(ptx_file).await?;
-    let ptx_meta = ptx.metadata().await?;
-    let ptx_timestamp = ptx_meta.ctime();
-    let mut ptx_data = Vec::with_capacity(ptx_meta.len() as usize);
-    ptx.read_to_end(&mut ptx_data).await?;
-    drop(ptx);
-    let ptx_created = chrono::DateTime::from_timestamp(ptx_timestamp, 0)
-        .ok_or("could not determine ptx file timestamp")?
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let ptx_size = ptx_data.len();
-    let time = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let config_annotations = maplit::btreemap! {
-        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename.clone(),
-        ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => ptx_created,
-        IO_PTSESSION_SAMPLE_RATE.to_string() => session.session_sample_rate.to_string(),
-    };
-    let manifest_annotations = maplit::btreemap! {
-        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename,
-        ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => time,
-    };
-    let config = Config {
-        data: ptx_data,
-        media_type: "application/vnd.avid.ptx".to_string(),
-        annotations: Some(config_annotations.clone()),
-    };
-    let manifest = OciImageManifest {
-        schema_version: 2,
-        media_type: Some(OCI_IMAGE_MEDIA_TYPE.to_string()),
-        artifact_type: Some("application/vnd.avid.ptsession".to_string()),
-        config: OciDescriptor {
-            size: ptx_size as i64,
-            media_type: config.media_type.clone(),
-            digest: config.sha256_digest(),
-            annotations: Some(config_annotations),
-            ..Default::default()
-        },
-        layers,
-        annotations: Some(manifest_annotations),
-    };
-
-    println!("Pushing manifest...");
-    let res: PushResponse = client
-        .push(&reference, &[], config, &auth, Some(manifest))
-        .await?;
-    println!("Push completed. Manifest URL: {}", res.manifest_url);
+    push_manifest(&client, &reference, &auth, layers, session, ptx_file).await?;
 
     Ok(())
 }

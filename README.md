@@ -19,7 +19,7 @@ All features of [ptformat] except for MIDI parsing are supported. Support for Ma
 - [ ] Non-TUI progress (json/text logging)
 - [ ] Upload / Download retries ([reqwest_retry_middleware][middleware])
 - [ ] Better errors (like could not find file)
-- [ ] Save date created/modified annotations for sessions & files
+- [x] Save date created/modified annotations for sessions & files
 - [ ] Compress sessions
 - [ ] Upload pro tools originiator id's as annotations for finding files in other sessions
 
