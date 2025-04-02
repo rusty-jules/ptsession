@@ -1,15 +1,9 @@
-use crate::{
-    content_description::PTCD,
-    read_traits::*,
-    error::*,
-    session::*,
-    decrypt,
-};
+use crate::{content_description::PTCD, decrypt, error::*, read_traits::*, session::*};
 
-use log::{debug, warn, trace};
+use log::{debug, trace, warn};
 
-use std::io::Cursor;
 use std::convert::TryInto;
+use std::io::Cursor;
 
 macro_rules! filter_blocks {
     ($block_iter:expr, $child:expr) => {
@@ -25,16 +19,16 @@ macro_rules! filter_blocks {
 
 macro_rules! children_of {
     ($block:expr, $child:expr) => {
-        $block.children.iter()
+        $block
+            .children
+            .iter()
             .filter(|children| children.content_type == $child as u16)
     };
 
     ($block:expr, $child1:expr, $child2:expr) => {
-        $block.children.iter()
-            .filter(|children| {
-                children.content_type == $child1 as u16 ||
-                    children.content_type == $child2 as u16
-            })
+        $block.children.iter().filter(|children| {
+            children.content_type == $child1 as u16 || children.content_type == $child2 as u16
+        })
     };
 }
 
@@ -97,7 +91,7 @@ impl PtSessionParser {
         // Check BitCode
         debug!("BitCode check...");
         if ptf_unxored[0] != 0x03 && decrypt::find_bitcode(&ptf_unxored[..]).is_none() {
-            return Err(PtError::BitCode)
+            return Err(PtError::BitCode);
         }
 
         // Parse Endianness
@@ -133,12 +127,18 @@ impl PtSessionParser {
         let pos = self.position();
         let end = pos + len;
         trace!("Parsing str. Start {} End {} Len {}", pos, end, len);
-        let string = unsafe { std::str::from_utf8_unchecked(&self.reader.get_ref()[pos..end]).into() };
+        let string =
+            unsafe { std::str::from_utf8_unchecked(&self.reader.get_ref()[pos..end]).into() };
         self.set_position(end);
         Ok(string)
     }
 
-    fn parse_block_at(&mut self, pos: usize, parent: Option<&Block>, level: i32) -> Result<Block, io::Error> {
+    fn parse_block_at(
+        &mut self,
+        pos: usize,
+        parent: Option<&Block>,
+        level: i32,
+    ) -> Result<Block, io::Error> {
         const Z_MARK: u8 = 0x5a;
 
         let len = self.reader.get_ref().len();
@@ -187,7 +187,7 @@ impl PtSessionParser {
         while i < block.size && pos + i + child_jump < max {
             let p = pos + i;
             child_jump = 0;
-            
+
             if let Ok(child) = self.parse_block_at(p, Some(&block), level + 1) {
                 child_jump = child.size + 7;
                 block.children.push(child);
@@ -204,9 +204,11 @@ impl PtSessionParser {
             Ok(block) => match block.content_type.try_into() {
                 Ok(PTCD::INFO_Version) => {
                     // old PT
-                    let skip = self.parse_str_at(block.offset + 3)
+                    let skip = self
+                        .parse_str_at(block.offset + 3)
                         .map_err(PtError::Io)?
-                        .len() + 8;
+                        .len()
+                        + 8;
                     self.set_position(block.offset + 3 + skip);
                     self.version = Some(self.read_u32().map_err(PtError::Io)? as u8);
                 }
@@ -217,13 +219,12 @@ impl PtSessionParser {
                     self.version = Some(version);
                 }
                 _ => {
-                    return Err(
-                        PtError::Version(
-                            format!("Could not parse version block type: {:#04x}",
-                            block.content_type)
-                    ));
+                    return Err(PtError::Version(format!(
+                        "Could not parse version block type: {:#04x}",
+                        block.content_type
+                    )));
                 }
-            }
+            },
             Err(e) => {
                 warn!("Could not parse version block: {}", e);
                 let ptf_unxored = self.unxored();
@@ -237,9 +238,7 @@ impl PtSessionParser {
                 if version != 0 {
                     self.version = Some(version);
                 } else {
-                    return Err(
-                        PtError::Version("Failed to parse version block".into())
-                    )
+                    return Err(PtError::Version("Failed to parse version block".into()));
                 }
             }
         }
@@ -254,16 +253,14 @@ impl PtSessionParser {
         let session_sample_rate = self.parse_header()?;
 
         debug!("Parsing audio files...");
-        let audio_files = self.parse_audio_files()
-            .map_err(PtError::Io)?;
+        let audio_files = self.parse_audio_files().map_err(PtError::Io)?;
 
         debug!("Parsing audio tracks...");
-        let (audio_tracks, audio_regions) = self.parse_audio_tracks(&audio_files)
-            .map_err(PtError::Io)?;
+        let (audio_tracks, audio_regions) =
+            self.parse_audio_tracks(&audio_files).map_err(PtError::Io)?;
 
         debug!("Parsing markers...");
-        let markers = self.parse_markers()
-            .map_err(PtError::Io)?;
+        let markers = self.parse_markers().map_err(PtError::Io)?;
 
         let session = PtSession {
             version: self.version.unwrap(),
@@ -287,19 +284,19 @@ impl PtSessionParser {
             match self.parse_block_at(i, None, 0) {
                 Ok(block) => {
                     count += 1;
-                    i += if block.size > 0 {
-                        block.size + 7
-                    } else {
-                        1
-                    };
+                    i += if block.size > 0 { block.size + 7 } else { 1 };
                     if let Ok(ptcd) = block.content_type.try_into() {
                         use PTCD::*;
                         match ptcd {
                             INFO_SampleRate => block_map.header_blocks.push(block),
                             WAV_List_Full => block_map.wav_blocks.push(block),
-                            AUDIO_Region_List_v5 | AUDIO_Region_List_v10  => block_map.region_to_wav_blocks.push(block),
+                            AUDIO_Region_List_v5 | AUDIO_Region_List_v10 => {
+                                block_map.region_to_wav_blocks.push(block)
+                            }
                             AUDIO_Tracks => block_map.track_blocks.push(block),
-                            AUDIO_Region_Track_Full_Map | AUDIO_Region_Track_Full_Map_v8 => block_map.region_to_track_blocks.push(block),
+                            AUDIO_Region_Track_Full_Map | AUDIO_Region_Track_Full_Map_v8 => {
+                                block_map.region_to_track_blocks.push(block)
+                            }
                             MARKER_List => block_map.marker_blocks.push(block),
                             _ => {}
                         }
@@ -321,7 +318,7 @@ impl PtSessionParser {
 
         debug!("Header blocks: {}", block_map.header_blocks.len());
         if block_map.header_blocks.is_empty() {
-            return Err(PtError::Parse)
+            return Err(PtError::Parse);
         }
 
         let offset = block_map.header_blocks[0].offset;
@@ -343,12 +340,21 @@ impl PtSessionParser {
                 self.set_position(child.offset + 11);
                 let mut n = 0;
 
-                debug!("Found WAV @pos {} offset {} size {}", self.position(), child.offset, child.size);
+                debug!(
+                    "Found WAV @pos {} offset {} size {}",
+                    self.position(),
+                    child.offset,
+                    child.size
+                );
 
                 while self.position() < child.offset + child.size && n < num_waves {
                     let wav_name = self.parse_str()?;
-                    let wav_type =
-                        unsafe { std::str::from_utf8_unchecked(&self.reader.get_ref()[self.position()..(self.position() + 4)]).to_string() };
+                    let wav_type = unsafe {
+                        std::str::from_utf8_unchecked(
+                            &self.reader.get_ref()[self.position()..(self.position() + 4)],
+                        )
+                        .to_string()
+                    };
                     self.increment_position(9);
 
                     if wav_name.contains(".grp")
@@ -394,7 +400,9 @@ impl PtSessionParser {
         }
 
         let mut wav_iter = audio_files.iter_mut();
-        for block in filter_blocks!(wav_blocks.iter(), PTCD::WAV_Metadata => PTCD::WAV_SampleRate_Size) {
+        for block in
+            filter_blocks!(wav_blocks.iter(), PTCD::WAV_Metadata => PTCD::WAV_SampleRate_Size)
+        {
             if let Some(wav) = wav_iter.next() {
                 self.set_position(block.offset + 8);
                 wav.len = self.read_u64()?;
@@ -405,21 +413,31 @@ impl PtSessionParser {
         Ok(audio_files)
     }
 
-    fn parse_audio_tracks(&mut self, audio_files: &[Wav]) -> Result<(Vec<Track>, Vec<Region>), io::Error> {
+    fn parse_audio_tracks(
+        &mut self,
+        audio_files: &[Wav],
+    ) -> Result<(Vec<Track>, Vec<Region>), io::Error> {
         const MAX_CHANNELS_PER_TRACK: usize = 8;
         let mut audio_tracks: Vec<Track> = vec![];
         let mut regions = vec![];
         let block_map = self.block_map.take();
-        let BlockMap { track_blocks, region_to_track_blocks, region_to_wav_blocks, .. }
-            = &block_map.as_ref().unwrap();
-
+        let BlockMap {
+            track_blocks,
+            region_to_track_blocks,
+            region_to_wav_blocks,
+            ..
+        } = &block_map.as_ref().unwrap();
 
         let mut channel_map = [0u16; MAX_CHANNELS_PER_TRACK];
         let mut region_index = 0;
 
         // Wav source -> Regions
         for block in region_to_wav_blocks {
-            for b in children_of!(block, PTCD::AUDIO_Region_Name_Number_v5, PTCD::AUDIO_Region_Name_Number_v10) {
+            for b in children_of!(
+                block,
+                PTCD::AUDIO_Region_Name_Number_v5,
+                PTCD::AUDIO_Region_Name_Number_v10
+            ) {
                 self.set_position(b.offset + 11);
                 let mut region = self.parse_region_info(b.offset + b.size)?;
                 if let Some(wav) = audio_files
@@ -463,9 +481,7 @@ impl PtSessionParser {
         for block in region_to_track_blocks {
             match block.content_type.try_into() {
                 // Old PT
-                Ok(PTCD::AUDIO_Region_Track_Full_Map) => {
-
-                }
+                Ok(PTCD::AUDIO_Region_Track_Full_Map) => {}
                 // New PT
                 Ok(PTCD::AUDIO_Region_Track_Full_Map_v8) => {
                     let mut count = 0;
@@ -487,8 +503,12 @@ impl PtSessionParser {
                                 let start = self.read_u32()?;
 
                                 let track_index = count;
-                                if let Some(ref mut track) = audio_tracks.iter_mut().find(|t| t.index == track_index) {
-                                    if let Some(region) = regions.iter_mut().find(|r| r.index == raw_index) {
+                                if let Some(ref mut track) =
+                                    audio_tracks.iter_mut().find(|t| t.index == track_index)
+                                {
+                                    if let Some(region) =
+                                        regions.iter_mut().find(|r| r.index == raw_index)
+                                    {
                                         // start as f32 * rate_factor
                                         region.start_pos = start as u64;
                                         track.regions.push(region.clone());
@@ -535,12 +555,14 @@ impl PtSessionParser {
     }
 
     fn parse_markers(&mut self) -> Result<Vec<Marker>, io::Error> {
-        return Ok(Vec::new());
+        //return Ok(Vec::new());
         let block_map = self.block_map.take();
         let marker_blocks = &block_map.as_ref().unwrap().marker_blocks;
         let mut markers = vec![];
 
-        for block in filter_blocks!(marker_blocks.iter(), PTCD::MARKER_List_Full => PTCD::MARKER_List_Entry) {
+        for block in
+            filter_blocks!(marker_blocks.iter(), PTCD::MARKER_List_Full => PTCD::MARKER_List_Entry)
+        {
             trace!("In Marker Entry");
             self.set_position(block.offset + 2);
             let index = self.read_u16()?;
@@ -571,7 +593,7 @@ impl PtSessionParser {
                 comment,
             });
         }
-        
+
         self.block_map = block_map;
         Ok(markers)
     }
@@ -580,8 +602,8 @@ impl PtSessionParser {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::fs::read_to_string;
     use serde_json as serde;
+    use std::fs::read_to_string;
 
     #[test]
     fn regions() {
@@ -591,7 +613,10 @@ mod test {
         assert_eq!(session.session_sample_rate, 44100);
         assert!(session.audio_files.len() > 0);
         assert_eq!(session.audio_files[0].file_name, "region_name_WAV.wav");
-        assert_eq!(format!("{}", session), read_to_string("tests/RegionTestOutput.txt").unwrap());
+        assert_eq!(
+            format!("{}", session),
+            read_to_string("tests/RegionTestOutput.txt").unwrap()
+        );
     }
 
     #[test]
@@ -599,6 +624,10 @@ mod test {
         let session = PtSession::from("tests/MarkerTest.ptx");
         assert_eq!(session.version, 12);
         assert_eq!(session.session_sample_rate, 48000);
-        assert_eq!(session.markers, serde::from_str::<Vec<Marker>>(&read_to_string("tests/MarkerTestOutput.json").unwrap()).unwrap())
+        assert_eq!(
+            session.markers,
+            serde::from_str::<Vec<Marker>>(&read_to_string("tests/MarkerTestOutput.json").unwrap())
+                .unwrap()
+        )
     }
 }

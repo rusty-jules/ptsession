@@ -79,16 +79,12 @@ impl fmt::Display for PtSession {
             }
             writeln!(f)?;
         }
-        
+
         if !self.audio_tracks.is_empty() {
             writeln!(f, "Track name (Track#) (Region#) @ Absolute:")?;
             for t in &self.audio_tracks {
                 if !t.regions.is_empty() {
-                    write!(
-                        f, 
-                        "`{}` t({})",
-                        t.name, t.index
-                    )?;
+                    write!(f, "`{}` t({})", t.name, t.index)?;
                     for region in &t.regions {
                         write!(f, " r({}) @ {}", region.index, region.sample_offset)?;
                     }
@@ -102,8 +98,7 @@ impl fmt::Display for PtSession {
     }
 }
 
-#[derive(Debug, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Block {
     pub z_mark: u8,
     pub block_type: u16,
@@ -113,8 +108,7 @@ pub struct Block {
     pub children: Vec<Block>,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Wav {
     pub file_name: String,
     pub index: u16,
@@ -122,8 +116,7 @@ pub struct Wav {
     pub len: usize,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
     pub name: String,
     pub index: u16,
@@ -133,8 +126,7 @@ pub struct Region {
     pub wav: Option<Wav>,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub name: String,
     pub index: u16,
@@ -142,12 +134,10 @@ pub struct Track {
     pub regions: Vec<Region>,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Marker {
     pub name: String,
     pub index: u16,
     pub comment: String,
     pub sample_offset: usize,
 }
-

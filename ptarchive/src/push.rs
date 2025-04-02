@@ -1,5 +1,7 @@
-use super::annotations::*;
-use super::{Compression, HttpClient, PushArgs};
+use crate::annotations::*;
+use crate::args::{Compression, PushArgs};
+use crate::client::HttpClient;
+
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;

@@ -1,4 +1,7 @@
-use super::{Compression, HttpClient, MediaType, PullArgs, IO_DEIS_ORAS_CONTENT_UNPACK};
+use crate::annotations::*;
+use crate::args::{Compression, PullArgs};
+use crate::client::HttpClient;
+
 use std::fmt::Write;
 use std::ops::DerefMut;
 use std::path::PathBuf;

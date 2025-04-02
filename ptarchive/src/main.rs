@@ -1,7 +1,16 @@
-mod cli;
+mod annotations;
+mod args;
+mod client;
+mod info;
+mod pull;
+mod push;
+
+use crate::args::*;
+use crate::info::*;
+use crate::pull::*;
+use crate::push::*;
 
 use clap::Parser;
-use cli::*;
 use oci_client::Reference;
 use ptsession::PtSession;
 use std::str::FromStr;

@@ -1,8 +1,8 @@
+use crate::annotations::MediaType;
+
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use std::{convert::TryFrom, path::PathBuf};
-
-use super::MediaType;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
