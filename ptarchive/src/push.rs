@@ -2,15 +2,15 @@ use crate::annotations::*;
 use crate::args::{Compression, PushArgs};
 use crate::client::HttpClient;
 
-use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use async_compression::tokio::write::{GzipEncoder, XzEncoder, ZstdEncoder};
-use futures_util::{StreamExt, TryStreamExt};
+use async_compression::tokio::bufread::{GzipEncoder, XzEncoder, ZstdEncoder};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::manifest::OciDescriptor;
 use oci_client::{
@@ -23,29 +23,39 @@ use oci_client::{
 use ptsession::{session::Wav, PtSession};
 use sha2::{Digest as _, Sha256};
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::mpsc::Sender;
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
+use tokio_util::bytes::Bytes;
+use tokio_util::io::ReaderStream;
 
-const BUF_CAPACITY: usize = 64 * 1024; // 64KB
+//const BUF_CAPACITY: usize = 64 * 1024; // 64KB
 
 // Stream that calculates digests while reading
-struct DigestReader<R> {
+struct DigestReader<R>
+where
+    R: AsyncRead + Unpin,
+{
     inner: R,
-    hasher: Sha256,
+    hasher: Arc<Mutex<Sha256>>,
     progress: Option<ProgressBar>,
+    size: Arc<AtomicUsize>,
 }
 
 impl<R: AsyncRead + Unpin> DigestReader<R> {
     fn new(inner: R, progress: Option<ProgressBar>) -> Self {
         Self {
             inner,
-            hasher: Sha256::new(),
+            hasher: Arc::new(Mutex::new(Sha256::new())),
             progress,
+            size: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    fn digest(&self) -> String {
-        format!("sha256:{:x}", self.hasher.clone().finalize())
+    fn digest_handle(&self) -> Arc<Mutex<Sha256>> {
+        self.hasher.clone()
+    }
+
+    fn size_tracker(&self) -> Arc<AtomicUsize> {
+        self.size.clone()
     }
 }
 
@@ -65,12 +75,16 @@ impl<R: AsyncRead + Unpin> AsyncRead for DigestReader<R> {
 
                 if bytes_read > 0 {
                     // Update digest
-                    self.hasher.update(&buf.filled()[original_filled..]);
+                    let mut hasher = self.hasher.lock().unwrap();
+                    hasher.update(&buf.filled()[original_filled..]);
 
                     // Update progress if provided
                     if let Some(progress) = &self.progress {
                         progress.inc(bytes_read as u64);
                     }
+
+                    // Update size counter
+                    self.size.fetch_add(bytes_read, Ordering::SeqCst);
                 }
 
                 Poll::Ready(Ok(()))
@@ -80,154 +94,63 @@ impl<R: AsyncRead + Unpin> AsyncRead for DigestReader<R> {
     }
 }
 
-/// Stream that calculates digest while writing
-struct DigestWriter<W> {
-    inner: W,
-    hasher: Sha256,
-    size: Arc<Mutex<u64>>,
-}
-
-impl<W: AsyncWrite + Unpin> DigestWriter<W> {
-    fn new(inner: W) -> Self {
-        Self {
-            inner,
-            hasher: Sha256::new(),
-            size: Arc::new(Mutex::new(0)),
-        }
+impl<R: AsyncRead + AsyncBufRead + Unpin> AsyncBufRead for DigestReader<R> {
+    fn consume(mut self: Pin<&mut Self>, amt: usize) {
+        Pin::new(&mut self.inner).consume(amt)
     }
 
-    fn digest(&self) -> String {
-        format!("sha256:{:x}", self.hasher.clone().finalize())
-    }
-
-    #[allow(unused)]
-    fn size(&self) -> u64 {
-        *self.size.lock().unwrap()
-    }
-
-    fn size_tracker(&self) -> Arc<Mutex<u64>> {
-        self.size.clone()
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_fill_buf(cx)
     }
 }
 
-impl<W: AsyncWrite + Unpin> AsyncWrite for DigestWriter<W> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        match Pin::new(&mut self.inner).poll_write(cx, buf) {
-            Poll::Ready(Ok(n)) => {
-                if n > 0 {
-                    // Update digest with written data
-                    self.hasher.update(&buf[..n]);
-
-                    // Update size counter
-                    let mut size = self.size.lock().unwrap();
-                    *size += n as u64;
-                }
-
-                Poll::Ready(Ok(n))
-            }
-            other => other,
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
+enum CompressorEncoder<R: AsyncRead + AsyncBufRead + Unpin> {
+    XZ(XzEncoder<R>),
+    ZSTD(ZstdEncoder<R>),
+    GZIP(GzipEncoder<R>),
+    None(R),
 }
 
-enum CompressorEncoder<W: AsyncWrite + Unpin + Send> {
-    XZ(XzEncoder<DigestWriter<W>>),
-    ZSTD(ZstdEncoder<DigestWriter<W>>),
-    GZIP(GzipEncoder<DigestWriter<W>>),
-    None(DigestWriter<W>),
-}
-
-struct Compressor<W>
+struct Compressor<R>
 where
-    W: AsyncWrite + Unpin + Send + Sync,
+    R: AsyncRead + AsyncBufRead + Unpin,
 {
-    encoder: CompressorEncoder<W>,
+    encoder: CompressorEncoder<R>,
 }
 
-impl<W> Compressor<W>
+impl<R> AsyncRead for Compressor<R>
 where
-    W: AsyncWrite + Unpin + Send + Sync,
+    R: AsyncRead + AsyncBufRead + Unpin,
 {
-    fn into_inner(self) -> DigestWriter<W> {
-        match self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder.into_inner(),
-            CompressorEncoder::ZSTD(encoder) => encoder.into_inner(),
-            CompressorEncoder::GZIP(encoder) => encoder.into_inner(),
-            CompressorEncoder::None(encoder) => encoder,
-        }
-    }
-}
-
-impl<W> Deref for Compressor<W>
-where
-    W: AsyncWrite + Unpin + Send + Sync + 'static,
-{
-    type Target = dyn AsyncWrite + Unpin + Send + Sync;
-
-    fn deref(&self) -> &Self::Target {
-        match &self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder,
-            CompressorEncoder::ZSTD(encoder) => encoder,
-            CompressorEncoder::GZIP(encoder) => encoder,
-            CompressorEncoder::None(encoder) => encoder,
-        }
-    }
-}
-
-impl<W> DerefMut for Compressor<W>
-where
-    W: AsyncWrite + Unpin + Send + Sync + 'static,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         match &mut self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder,
-            CompressorEncoder::ZSTD(encoder) => encoder,
-            CompressorEncoder::GZIP(encoder) => encoder,
-            CompressorEncoder::None(encoder) => encoder,
+            CompressorEncoder::XZ(encoder) => Pin::new(encoder).poll_read(cx, buf),
+            CompressorEncoder::ZSTD(encoder) => Pin::new(encoder).poll_read(cx, buf),
+            CompressorEncoder::GZIP(encoder) => Pin::new(encoder).poll_read(cx, buf),
+            CompressorEncoder::None(encoder) => Pin::new(encoder).poll_read(cx, buf),
         }
     }
 }
 
-impl<W> Compressor<W>
-where
-    W: AsyncWrite + Unpin + Send + Sync,
-{
-    fn get_mut(&mut self) -> &mut DigestWriter<W> {
-        match &mut self.encoder {
-            CompressorEncoder::XZ(encoder) => encoder.get_mut(),
-            CompressorEncoder::ZSTD(encoder) => encoder.get_mut(),
-            CompressorEncoder::GZIP(encoder) => encoder.get_mut(),
-            CompressorEncoder::None(encoder) => encoder,
-        }
-    }
-}
-
-impl<W: AsyncWrite + Unpin + Send + Sync> From<(Compression, DigestWriter<W>)> for Compressor<W> {
-    fn from((compression, writer): (Compression, DigestWriter<W>)) -> Self {
+impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R)> for Compressor<R> {
+    fn from((compression, reader): (Compression, R)) -> Self {
         match compression {
             Compression::XZ => Self {
-                encoder: CompressorEncoder::XZ(XzEncoder::new(writer)),
+                encoder: CompressorEncoder::XZ(XzEncoder::new(reader)),
             },
             Compression::ZSTD => Self {
-                encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(writer)),
+                encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(reader)),
             },
             Compression::GZIP => Self {
-                encoder: CompressorEncoder::GZIP(GzipEncoder::new(writer)),
+                encoder: CompressorEncoder::GZIP(GzipEncoder::new(reader)),
             },
             Compression::None => Self {
-                encoder: CompressorEncoder::None(writer),
+                encoder: CompressorEncoder::None(reader),
             },
         }
     }
@@ -279,26 +202,21 @@ async fn begin_push_chunked_session(
     }
 }
 
-async fn push_chunk(
+async fn push_stream<S>(
     client: &HttpClient,
     location: &str,
     image: &Reference,
-    blob_data: &[u8],
-    start_byte: usize,
-) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
-    if blob_data.is_empty() {
-        return Err("No data to push".into());
-    }
-
-    let end_byte = start_byte + blob_data.len() - 1;
-
+    stream: S,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+{
     let res = client
         .patch(location)
         .await
-        .header("Content-Range", format!("{}-{}", start_byte, end_byte))
-        .header("Content-Length", blob_data.len())
         .header("Content-Type", "application/octet-stream")
-        .body(blob_data.to_vec())
+        .header("Transfer-Encoding", "chunked")
+        .body(reqwest::Body::wrap_stream(stream))
         .send()
         .await?;
 
@@ -319,7 +237,7 @@ async fn push_chunk(
             format!("http://{}{}", registry, location)
         };
 
-        Ok((new_location, end_byte + 1))
+        Ok(new_location)
     } else {
         Err(format!(
             "Failed to push chunk: {} - {}",
@@ -371,66 +289,6 @@ async fn end_push_chunked_session(
     }
 }
 
-async fn compress_blob<R: AsyncRead + Unpin>(
-    file_name: String,
-    mut encoder: Compressor<Vec<u8>>,
-    mut digest_reader: DigestReader<R>,
-    compressed_tx: Sender<Vec<u8>>,
-) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-    // Create buffer for reading
-    let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer
-
-    // Read from file, compress, and send chunks
-    loop {
-        let n = digest_reader.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-
-        // Write to encoder
-        encoder.write_all(&buffer[..n]).await?;
-
-        // Periodically flush to get compressed chunks
-        if n == buffer.len() {
-            // This is likely a full buffer, so there might be more data coming
-            encoder.flush().await?;
-
-            // Extract compressed data
-            let inner_writer = encoder.get_mut();
-            let chunk = std::mem::replace(&mut inner_writer.inner, Vec::with_capacity(64 * 1024));
-
-            if !chunk.is_empty() {
-                compressed_tx
-                    .send(chunk)
-                    .await
-                    .map_err(|_| "Channel closed")?;
-            }
-        }
-    }
-
-    // Finish the compression
-    encoder.shutdown().await?;
-
-    // Get the final compressed data
-    let inner_writer = encoder.into_inner();
-    let compressed_digest = inner_writer.digest();
-    let final_chunk = inner_writer.inner;
-
-    if !final_chunk.is_empty() {
-        compressed_tx
-            .send(final_chunk)
-            .await
-            .map_err(|_| "Channel closed")?;
-    }
-
-    if let Some(progress) = &digest_reader.progress {
-        progress.finish_with_message(format!("Compression complete {}", file_name));
-    }
-
-    // Return the digests
-    Ok((compressed_digest, digest_reader.digest()))
-}
-
 async fn compress_and_upload(
     client: &oci_client::Client,
     reference: &Reference,
@@ -449,64 +307,49 @@ async fn compress_and_upload(
     compression_progress.set_length(file_size);
 
     // Create digest reader to calculate original file digest
-    let digest_reader = DigestReader::new(file, Some(compression_progress));
+    let digest_reader = DigestReader::new(BufReader::new(file), None);
+    let original_digest_hasher = digest_reader.digest_handle();
 
-    // Create vector to store compressed data chunks temporarily
-    let compressed_chunks = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-    let (compressed_tx, mut compressed_rx) = compressed_chunks;
+    // Create compression encoder
+    let encoder: Compressor<_> = Compressor::from((compression, digest_reader));
 
-    // Create in-memory buffer for compressed data
-    let buffer = Vec::new();
-    let digest_writer = DigestWriter::new(buffer);
-    let compressed_size_tracker = digest_writer.size_tracker();
+    // Create digest reader to calculate compressed file digest
+    let compressed_digest_reader = DigestReader::new(encoder, Some(compression_progress));
+    let compressed_digest_hasher = compressed_digest_reader.digest_handle();
+    let compressed_size_tracker = compressed_digest_reader.size_tracker();
 
-    // Create compression encoder with digest writer
-    let encoder: Compressor<_> = Compressor::from((compression, digest_writer));
+    // Clone progress items for stream op
+    let progress_stream = upload_progress.clone();
+    let progress_size_tracker = compressed_size_tracker.clone();
 
-    // Spawn task to compress the file
-    let compression_task = tokio::spawn(compress_blob(
-        file_path.to_string(),
-        encoder,
-        digest_reader,
-        compressed_tx,
-    ));
+    // Create stream
+    let chunk_stream = ReaderStream::new(compressed_digest_reader).and_then(move |bytes| {
+        progress_stream.set_length(progress_size_tracker.load(Ordering::SeqCst) as u64);
+        progress_stream.inc(bytes.len() as u64);
+        futures_util::future::ok(bytes)
+    });
 
     // Start the upload session
-    let mut location = begin_push_chunked_session(&http_client, reference).await?;
-    let mut start_byte = 0;
+    let location = begin_push_chunked_session(&http_client, reference).await?;
 
     // Set up upload progress bar
     upload_progress.set_message(format!("Uploading {file_path}"));
+    push_stream(&http_client, &location, &reference, chunk_stream).await?;
 
-    // Process compressed chunks as they become available
-    while let Some(chunk) = compressed_rx.recv().await {
-        if !chunk.is_empty() {
-            // Push this chunk
-            let (new_location, new_start) =
-                push_chunk(&http_client, &location, reference, &chunk, start_byte).await?;
-
-            // Update progress
-            upload_progress.set_length(*compressed_size_tracker.lock().unwrap());
-            upload_progress.set_position(new_start as u64);
-
-            // Update state for next iteration
-            location = new_location;
-            start_byte = new_start;
-        }
-    }
-
-    // Wait for compression to complete and get digests
-    let (compressed_digest, original_digest) = match compression_task.await? {
-        Ok(res) => res,
-        Err(e) => return Err(e),
-    };
-
-    // Get final compressed size
-    let compressed_size = *compressed_size_tracker.lock().unwrap();
+    // Get final compressed digest and size
+    let original_digest = format!(
+        "sha256:{:x}",
+        original_digest_hasher.lock().unwrap().clone().finalize()
+    );
+    let compressed_digest = format!(
+        "sha256:{:x}",
+        compressed_digest_hasher.lock().unwrap().clone().finalize()
+    );
+    let compressed_size = compressed_size_tracker.load(Ordering::SeqCst);
 
     // Set final upload progress bar length and position
-    upload_progress.set_length(compressed_size);
-    upload_progress.set_position(compressed_size);
+    upload_progress.set_length(compressed_size as u64);
+    upload_progress.set_position(compressed_size as u64);
 
     // Finish the upload
     let _blob_url =
@@ -520,7 +363,6 @@ async fn compress_and_upload(
         ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.to_string(),
         IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
         IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
-        IO_PTSESSION_COMPRESSED_DIGEST.to_string() => compressed_digest.clone(),
         IO_DEIS_ORAS_CONTENT_UNPACK.to_string() => "true".to_string()
     };
 

@@ -15,8 +15,6 @@ impl<'a> Deref for MediaType<'a> {
 pub const IO_PTSESSION_ORIGINAL_DIGEST: &str = "io.ptsession.original.digest";
 /// Size of a blob before compression
 pub const IO_PTSESSION_ORIGINAL_SIZE: &str = "io.ptsession.original.size";
-/// Digest of a blob after compression
-pub const IO_PTSESSION_COMPRESSED_DIGEST: &str = "io.ptsession.compressed.digest";
 /// Sample rate of a pro tools session config
 pub const IO_PTSESSION_SAMPLE_RATE: &str = "io.ptsession.sample_rate";
 /// Whether to decompress a blob on pull

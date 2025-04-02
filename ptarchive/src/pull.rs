@@ -228,7 +228,7 @@ pub async fn pull(
     .expect("correct progress style")
     .with_key(
         "check",
-        |state: &indicatif::ProgressState, w: &mut dyn Write| write!(w, "✖︎").unwrap(),
+        |_state: &indicatif::ProgressState, w: &mut dyn Write| write!(w, "✖︎").unwrap(),
     )
     .progress_chars("#>-");
 
