@@ -2,6 +2,8 @@ use crate::annotations::*;
 use crate::args::{Compression, PushArgs};
 use crate::client::HttpClient;
 
+use std::collections::BTreeMap;
+use std::io::Cursor;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::pin::Pin;
@@ -296,6 +298,7 @@ async fn compress_and_upload(
     compression: Compression,
     compression_progress: ProgressBar,
     upload_progress: ProgressBar,
+    pushed_digests: BTreeMap<String, OciDescriptor>,
 ) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
     // Create a shared http client wrapper for this operation
     let http_client = HttpClient::new(client);
@@ -313,11 +316,20 @@ async fn compress_and_upload(
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     // Create digest reader to calculate original file digest
-    let digest_reader = DigestReader::new(BufReader::new(file), None);
+    let mut digest_reader = DigestReader::new(file, None);
     let original_digest_hasher = digest_reader.digest_handle();
+    // Read the file into memory and compute the digest
+    let mut buf = Vec::with_capacity(file_size as usize);
+    tokio::io::copy(&mut digest_reader, &mut buf).await?;
+    let original_digest = original_digest_hasher.lock().unwrap().clone().finalize();
+    if let Some(descriptor) = pushed_digests.get(&format!("sha256:{:x}", original_digest)) {
+        compression_progress.finish_with_message(format!("Exists {file_path}"));
+        upload_progress.finish_with_message(format!("Exists {file_path}"));
+        return Ok(descriptor.clone());
+    }
 
     // Create compression encoder
-    let encoder: Compressor<_> = Compressor::from((compression, digest_reader));
+    let encoder: Compressor<_> = Compressor::from((compression, BufReader::new(Cursor::new(buf))));
 
     // Create digest reader to calculate compressed file digest
     let compressed_digest_reader = DigestReader::new(encoder, Some(compression_progress));
@@ -430,6 +442,42 @@ pub async fn push(
         .template("[{elapsed_precise}] {bar:40.green/red} {bytes}/{total_bytes} {msg}")
         .unwrap();
 
+    // fetch all original digests
+    let tags = client.list_tags(&reference, &auth, None, None).await?;
+    let original_digests: BTreeMap<String, OciDescriptor> =
+        futures_util::stream::iter(tags.tags.into_iter())
+            .map(|tag| {
+                let a = auth.clone();
+                let c = client.clone();
+                let r = reference.clone();
+
+                async move {
+                    let reference = Reference::with_tag(
+                        r.registry().to_string(),
+                        r.repository().to_string(),
+                        tag,
+                    );
+                    let (manifest, _) = c.pull_image_manifest(&reference, &a).await?;
+                    let digests = manifest
+                        .layers
+                        .into_iter()
+                        .filter_map(|layer| match &layer.annotations {
+                            None => None,
+                            Some(annotations) => {
+                                match annotations.get(IO_PTSESSION_ORIGINAL_DIGEST) {
+                                    None => None,
+                                    Some(digest) => Some((digest.clone(), layer)),
+                                }
+                            }
+                        })
+                        .collect::<BTreeMap<String, OciDescriptor>>();
+                    Ok::<_, Box<dyn ::std::error::Error + Sync + Send>>(digests)
+                }
+            })
+            .buffer_unordered(10)
+            .try_concat()
+            .await?;
+
     // Process all files in parallel with progress reporting
     println!("Processing audio files with parallelism: {}", parallelism);
 
@@ -440,6 +488,7 @@ pub async fn push(
             let multi_progress = multi_progress.clone();
             let compression_style = compression_style.clone();
             let upload_style = upload_style.clone();
+            let original_digests = original_digests.clone();
 
             async move {
                 let file_name = Path::new(&file_path).to_string_lossy().to_string();
@@ -461,6 +510,7 @@ pub async fn push(
                     compression,
                     compression_progress,
                     upload_progress,
+                    original_digests,
                 )
                 .await?;
 

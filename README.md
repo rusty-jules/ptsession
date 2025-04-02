@@ -12,7 +12,7 @@ All features of [ptformat] except for MIDI parsing are supported. Support for Ma
 
 ## TODO
 
-- [ ] Check digest of files before upload to skip existing blobs
+- [x] Check digest of files before upload to skip existing blobs
 - [ ] Check digest on download to skip existing blobs (avoid FileExists errors)
 - [ ] File search with tagging cache, parallelism, and reporting (split off with filter)
 - [ ] File search depth argument (-B num directories above, -A num dirs below, -C num dirs around (above and below))
