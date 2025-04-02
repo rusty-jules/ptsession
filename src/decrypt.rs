@@ -1,25 +1,12 @@
 use log::debug;
 
-use std::path::Path;
 use std::io::{self, Read};
-use std::fs;
 
 // Decrypt a PT Session File
-pub(crate) fn unxor<P: AsRef<Path>>(path: P) -> Result<Vec<u8>, io::Error> {
-    let file = fs::File::open(path)?;
-    let len = file.metadata()?.len();
-
-    if len < 0x14 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "File is too small",
-        ));
-    }
-
-    let mut ptf_unxored = vec![0u8; len as usize];
-
+pub(crate) fn unxor<R: Read>(data: R) -> Result<Vec<u8>, io::Error> {
     // First 20 bytes are unencrypted
-    let mut reader = io::BufReader::new(file);
+    let mut ptf_unxored = vec![0u8; 20];
+    let mut reader = io::BufReader::new(data);
     reader.read_exact(&mut ptf_unxored[..0x14])?;
     debug!("Read first 20 bytes");
 
@@ -59,7 +46,7 @@ pub(crate) fn unxor<P: AsRef<Path>>(path: P) -> Result<Vec<u8>, io::Error> {
         } else {
             (index >> 12) & 0xff
         };
-        ptf_unxored[index] = byte ^ xxor[xor_index];
+        ptf_unxored.push(byte ^ xxor[xor_index]);
     }
 
     debug!("PTF decrypted");

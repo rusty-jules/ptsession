@@ -91,9 +91,8 @@ impl PtSessionParser {
         self.reader.get_ref()
     }
 
-    pub fn decrypt<P: AsRef<std::path::Path>>(path: P) -> Result<Self, PtError> {
-        let ptf_unxored = decrypt::unxor(path)
-            .map_err(|e| PtError::Decrypt(e))?;
+    pub fn decrypt<R: Read>(data: R) -> Result<Self, PtError> {
+        let ptf_unxored = decrypt::unxor(data).map_err(|e| PtError::Decrypt(e))?;
 
         // Check BitCode
         debug!("BitCode check...");
