@@ -374,7 +374,7 @@ async fn compress_and_upload(
     Ok(OciDescriptor {
         urls: None,
         digest: compressed_digest,
-        size: file_size as i64,
+        size: compressed_size as i64,
         media_type,
         annotations: Some(annotations),
     })
