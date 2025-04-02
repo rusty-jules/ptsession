@@ -1,10 +1,12 @@
-use serde::{Serialize, Deserialize};
-
-use std::path::Path;
+use crate::parser::PtSessionParser;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
-#[derive(Default, Debug, PartialEq)]
-#[derive(Serialize, Deserialize)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PtSession {
     pub session_sample_rate: u64,
     pub version: u8,
@@ -15,12 +17,23 @@ pub struct PtSession {
     pub markers: Vec<Marker>,
 }
 
-impl<P: AsRef<Path>> From<P> for PtSession {
-    fn from(path: P) -> Self {
-        crate::parser::PtSessionParser::decrypt(path)
+impl PtSession {
+    fn from_reader<R: Read>(reader: R) -> Self {
+        PtSessionParser::decrypt(reader)
             .expect("Successful decrypt")
             .parse_session()
             .expect("Successful parse")
+    }
+
+    fn from_path<P: AsRef<Path>>(path: P) -> Self {
+        let file = File::open(path).unwrap();
+        Self::from_reader(file)
+    }
+}
+
+impl<P: AsRef<Path>> From<P> for PtSession {
+    fn from(value: P) -> Self {
+        PtSession::from_path(value)
     }
 }
 
