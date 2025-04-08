@@ -2,6 +2,7 @@ use crate::annotations::*;
 use crate::args::PushArgs;
 use crate::client::HttpClient;
 use crate::compression::Compression;
+use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -487,15 +488,6 @@ pub async fn push(
     // Create a multi-progress bar
     let multi_progress = MultiProgress::new();
 
-    // Setup progress styles
-    let compression_style = ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} {msg}")
-        .unwrap();
-
-    let upload_style = ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] {bar:40.green/red} {bytes}/{total_bytes} {msg}")
-        .unwrap();
-
     // fetch all original digests
     let original_digests = fetch_original_digests(&client, &reference, &auth).await?;
 
@@ -507,8 +499,6 @@ pub async fn push(
             let client = client.clone();
             let reference = reference.clone();
             let multi_progress = multi_progress.clone();
-            let compression_style = compression_style.clone();
-            let upload_style = upload_style.clone();
             let original_digests = original_digests.clone();
 
             async move {
@@ -516,11 +506,11 @@ pub async fn push(
 
                 // Create progress bars for this file
                 let compression_progress = multi_progress.add(ProgressBar::new(0));
-                compression_progress.set_style(compression_style);
+                compression_progress.set_style(ProgressStyle::clone(&*COMPRESSION_STYLE));
                 compression_progress.set_message(format!("Compressing {}", file_name));
 
                 let upload_progress = multi_progress.add(ProgressBar::new(0));
-                upload_progress.set_style(upload_style);
+                upload_progress.set_style(ProgressStyle::clone(&*UPLOAD_STYLE));
                 upload_progress.set_message(format!("Uploading {}", file_name));
 
                 // Process the file

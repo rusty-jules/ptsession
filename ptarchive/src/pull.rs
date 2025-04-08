@@ -2,14 +2,14 @@ use crate::annotations::*;
 use crate::args::PullArgs;
 use crate::client::HttpClient;
 use crate::compression::Compression;
+use crate::style::{DOWNLOAD_STYLE, FAILED_STYLE, FINISH_STYLE};
 
 use std::convert::TryFrom;
-use std::fmt::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use futures_util::{stream, StreamExt, TryStreamExt};
-use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::manifest::OciDescriptor;
 use oci_client::{
     annotations::ORG_OPENCONTAINERS_IMAGE_TITLE,
@@ -28,7 +28,6 @@ async fn pull_and_decompress(
     file_name: &String,
     target_dir: Option<PathBuf>,
     download_progress: ProgressBar,
-    finish_style: ProgressStyle,
     compression: Compression,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // setup target file
@@ -60,7 +59,7 @@ async fn pull_and_decompress(
     // write stream to file
     let _ = tokio::io::copy(&mut decoder, &mut file).await?;
     file.flush().await?;
-    download_progress.set_style(finish_style);
+    download_progress.set_style(ProgressStyle::clone(&*FINISH_STYLE));
     download_progress.finish();
 
     Ok(())
@@ -96,57 +95,6 @@ pub async fn pull(
 
     let multi_progress = MultiProgress::new();
 
-    let download_style = ProgressStyle::with_template(
-        "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes:>12}/{total_bytes:<12} {check:.yellow} {msg} ({eta})",
-    )
-    .expect("correct progress style")
-    .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
-        write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap()
-    })
-    .with_key("check", |state: &indicatif::ProgressState, w: &mut dyn Write| {
-        let icon = if state.fraction() >= 1.0 {
-            "✓"
-        } else {
-            match state.elapsed().as_millis() as u64 % 4 {
-                0 => "⠋",
-                1 => "⠙",
-                2 => "⠹",
-                _ => "⠸",
-            }
-        };
-        write!(w, "{icon}").unwrap()
-    })
-    .progress_chars("#>-");
-
-    let finish_style = ProgressStyle::with_template(
-        "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes:>12}/{total_bytes:<12} {check:.green} {msg}",
-    )
-    .expect("correct progress style")
-    .with_key("check", |state: &indicatif::ProgressState, w: &mut dyn Write| {
-        let icon = if state.fraction() >= 1.0 {
-            "✓"
-        } else {
-            match state.elapsed().as_millis() as u64 % 4 {
-                0 => "⠋",
-                1 => "⠙",
-                2 => "⠹",
-                _ => "⠸",
-            }
-        };
-        write!(w, "{icon}").unwrap()
-    })
-    .progress_chars("#>-");
-
-    let failed_style = ProgressStyle::with_template(
-        "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes:>12}/{total_bytes:<12} {check:.red} {msg}",
-    )
-    .expect("correct progress style")
-    .with_key(
-        "check",
-        |_state: &indicatif::ProgressState, w: &mut dyn Write| write!(w, "✖︎").unwrap(),
-    )
-    .progress_chars("#>-");
-
     // add config as a layer to pull
     let mut layers = manifest.layers;
     layers.push(manifest.config);
@@ -157,9 +105,6 @@ pub async fn pull(
             let reference = reference.clone();
             let target_dir = args.target_dir.clone();
             let multi_progress = multi_progress.clone();
-            let download_style = download_style.clone();
-            let finish_style = finish_style.clone();
-            let failed_style = failed_style.clone();
 
             // parse layer annotations
             let mut annotations = layer.annotations.take().expect("layer as annotations");
@@ -181,7 +126,7 @@ pub async fn pull(
 
                 if unpack.is_err() {
                     let err = unpack.unwrap_err();
-                    download_progress.set_style(failed_style);
+                    download_progress.set_style(ProgressStyle::clone(&*FAILED_STYLE));
                     download_progress.finish_with_message(format!(
                         "Unknown unpack annotation value for {file_name}: {}",
                         err.to_string()
@@ -191,7 +136,7 @@ pub async fn pull(
 
                 if compression.is_err() {
                     let err = compression.unwrap_err();
-                    download_progress.set_style(failed_style);
+                    download_progress.set_style(ProgressStyle::clone(&*FAILED_STYLE));
                     download_progress.finish_with_message(format!(
                         "Unknown compression type for {file_name}: {}",
                         err.to_string()
@@ -199,7 +144,7 @@ pub async fn pull(
                     return Err(err);
                 }
 
-                download_progress.set_style(download_style);
+                download_progress.set_style(ProgressStyle::clone(&*DOWNLOAD_STYLE));
                 download_progress.set_length(size);
 
                 let result = pull_and_decompress(
@@ -209,7 +154,6 @@ pub async fn pull(
                     &file_name,
                     target_dir,
                     download_progress,
-                    finish_style,
                     compression.unwrap(),
                 )
                 .await?;

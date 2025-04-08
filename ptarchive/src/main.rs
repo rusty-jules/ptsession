@@ -5,6 +5,7 @@ mod compression;
 mod info;
 mod pull;
 mod push;
+mod style;
 
 use crate::args::*;
 use crate::info::*;
