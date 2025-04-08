@@ -16,13 +16,15 @@ All features of [ptformat] except for MIDI parsing are supported. Support for Ma
 - [ ] Check digest on download to skip existing blobs (avoid FileExists errors)
 - [ ] File search with tagging cache, parallelism, and reporting (split off with filter)
 - [ ] File search depth argument (-B num directories above, -A num dirs below, -C num dirs around (above and below))
+- [ ] Consider defaulting to zstd -7 (faster than xz, xz may [have issues for archival][xz-issues])
 - [ ] Non-TUI progress (json/text logging)
-- [ ] Upload / Download retries ([reqwest_retry_middleware][middleware])
-- [ ] Better errors (like could not find file)
 - [x] Save date created/modified annotations for sessions & files
 - [ ] Compress sessions
 - [ ] Upload pro tools originiator id's as annotations for finding files in other sessions
+- [ ] Better errors (like could not find file)
+- [ ] Upload / Download retries ([reqwest_retry_middleware][middleware])
 
+[xz-issues]: https://www.nongnu.org/lzip/xz_inadequate.html
 [middleware]: https://docs.rs/reqwest-retry/latest/reqwest_retry/
 
 ## Nice to Haves

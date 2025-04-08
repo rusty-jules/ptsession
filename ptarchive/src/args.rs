@@ -1,8 +1,12 @@
 use crate::annotations::MediaType;
 
+use std::{convert::TryFrom, path::PathBuf};
+
+use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
+use async_compression::tokio::bufread::{GzipEncoder, XzEncoder, ZstdEncoder};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
-use std::{convert::TryFrom, path::PathBuf};
+use tokio::io::{AsyncBufRead, AsyncRead};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -161,5 +165,31 @@ impl<'a> TryFrom<MediaType<'a>> for Compression {
                 other => Err(format!("Unsupported compression algorithm: {other}"))?,
             },
         })
+    }
+}
+
+impl Compression {
+    pub fn compressor<R: AsyncBufRead + Unpin + Send + Sync + 'static>(
+        &self,
+        reader: R,
+    ) -> Box<dyn AsyncRead + Unpin + Send + Sync> {
+        match self {
+            Compression::XZ => Box::new(XzEncoder::new(reader)),
+            Compression::ZSTD => Box::new(ZstdEncoder::new(reader)),
+            Compression::GZIP => Box::new(GzipEncoder::new(reader)),
+            Compression::None => Box::new(reader),
+        }
+    }
+
+    pub fn decompressor<R: AsyncBufRead + Unpin + Send + 'static>(
+        &self,
+        reader: R,
+    ) -> Box<dyn AsyncRead + Unpin + Send> {
+        match self {
+            Compression::XZ => Box::new(XzDecoder::new(reader)),
+            Compression::ZSTD => Box::new(ZstdDecoder::new(reader)),
+            Compression::GZIP => Box::new(GzipDecoder::new(reader)),
+            Compression::None => Box::new(reader),
+        }
     }
 }

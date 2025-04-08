@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use async_compression::tokio::bufread::{GzipEncoder, XzEncoder, ZstdEncoder};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::manifest::OciDescriptor;
@@ -104,57 +103,6 @@ impl<R: AsyncRead + AsyncBufRead + Unpin> AsyncBufRead for DigestReader<R> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
         let this = self.get_mut();
         Pin::new(&mut this.inner).poll_fill_buf(cx)
-    }
-}
-
-enum CompressorEncoder<R: AsyncRead + AsyncBufRead + Unpin> {
-    XZ(XzEncoder<R>),
-    ZSTD(ZstdEncoder<R>),
-    GZIP(GzipEncoder<R>),
-    None(R),
-}
-
-struct Compressor<R>
-where
-    R: AsyncRead + AsyncBufRead + Unpin,
-{
-    encoder: CompressorEncoder<R>,
-}
-
-impl<R> AsyncRead for Compressor<R>
-where
-    R: AsyncRead + AsyncBufRead + Unpin,
-{
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match &mut self.encoder {
-            CompressorEncoder::XZ(encoder) => Pin::new(encoder).poll_read(cx, buf),
-            CompressorEncoder::ZSTD(encoder) => Pin::new(encoder).poll_read(cx, buf),
-            CompressorEncoder::GZIP(encoder) => Pin::new(encoder).poll_read(cx, buf),
-            CompressorEncoder::None(encoder) => Pin::new(encoder).poll_read(cx, buf),
-        }
-    }
-}
-
-impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R)> for Compressor<R> {
-    fn from((compression, reader): (Compression, R)) -> Self {
-        match compression {
-            Compression::XZ => Self {
-                encoder: CompressorEncoder::XZ(XzEncoder::new(reader)),
-            },
-            Compression::ZSTD => Self {
-                encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(reader)),
-            },
-            Compression::GZIP => Self {
-                encoder: CompressorEncoder::GZIP(GzipEncoder::new(reader)),
-            },
-            Compression::None => Self {
-                encoder: CompressorEncoder::None(reader),
-            },
-        }
     }
 }
 
@@ -329,7 +277,7 @@ async fn compress_and_upload(
     }
 
     // Create compression encoder
-    let encoder: Compressor<_> = Compressor::from((compression, BufReader::new(Cursor::new(buf))));
+    let encoder = compression.compressor(BufReader::new(Cursor::new(buf)));
 
     // Create digest reader to calculate compressed file digest
     let compressed_digest_reader = DigestReader::new(encoder, Some(compression_progress));

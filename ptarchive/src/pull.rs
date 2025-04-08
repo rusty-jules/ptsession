@@ -2,14 +2,11 @@ use crate::annotations::*;
 use crate::args::{Compression, PullArgs};
 use crate::client::HttpClient;
 
+use std::convert::TryFrom;
 use std::fmt::Write;
-use std::ops::DerefMut;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::str::FromStr;
-use std::{convert::TryFrom, ops::Deref};
 
-use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
 use futures_util::{stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use oci_client::manifest::OciDescriptor;
@@ -20,92 +17,8 @@ use oci_client::{
     secrets::RegistryAuth,
     Client, Reference,
 };
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_util::io::StreamReader;
-
-struct Decompressor<R>
-where
-    R: AsyncRead + AsyncBufRead + Unpin,
-{
-    decoder: DecompressorDecoder<R>,
-}
-
-impl<R> AsyncRead for Decompressor<R>
-where
-    R: AsyncRead + AsyncBufRead + Unpin,
-{
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match &mut self.decoder {
-            DecompressorDecoder::XZ(decoder) => Pin::new(decoder).poll_read(cx, buf),
-            DecompressorDecoder::ZSTD(decoder) => Pin::new(decoder).poll_read(cx, buf),
-            DecompressorDecoder::GZIP(decoder) => Pin::new(decoder).poll_read(cx, buf),
-            DecompressorDecoder::None(decoder) => Pin::new(decoder).poll_read(cx, buf),
-        }
-    }
-}
-
-enum DecompressorDecoder<R>
-where
-    R: AsyncRead + AsyncBufRead + Unpin,
-{
-    XZ(XzDecoder<R>),
-    ZSTD(ZstdDecoder<R>),
-    GZIP(GzipDecoder<R>),
-    None(R),
-}
-
-impl<R> Deref for Decompressor<R>
-where
-    R: AsyncRead + AsyncBufRead + Unpin + Send + Sync + 'static,
-{
-    type Target = dyn AsyncRead + Unpin + Send + Sync;
-
-    fn deref(&self) -> &Self::Target {
-        match &self.decoder {
-            DecompressorDecoder::XZ(decoder) => decoder,
-            DecompressorDecoder::ZSTD(decoder) => decoder,
-            DecompressorDecoder::GZIP(decoder) => decoder,
-            DecompressorDecoder::None(decoder) => decoder,
-        }
-    }
-}
-
-impl<R> DerefMut for Decompressor<R>
-where
-    R: AsyncRead + AsyncBufRead + Unpin + Send + Sync + 'static,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match &mut self.decoder {
-            DecompressorDecoder::XZ(decoder) => decoder,
-            DecompressorDecoder::ZSTD(decoder) => decoder,
-            DecompressorDecoder::GZIP(decoder) => decoder,
-            DecompressorDecoder::None(decoder) => decoder,
-        }
-    }
-}
-
-impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R)> for Decompressor<R> {
-    fn from((compression, reader): (Compression, R)) -> Self {
-        match compression {
-            Compression::XZ => Self {
-                decoder: DecompressorDecoder::XZ(XzDecoder::new(reader)),
-            },
-            Compression::ZSTD => Self {
-                decoder: DecompressorDecoder::ZSTD(ZstdDecoder::new(reader)),
-            },
-            Compression::GZIP => Self {
-                decoder: DecompressorDecoder::GZIP(GzipDecoder::new(reader)),
-            },
-            Compression::None => Self {
-                decoder: DecompressorDecoder::None(reader),
-            },
-        }
-    }
-}
 
 async fn pull_and_decompress(
     client: &HttpClient,
@@ -127,20 +40,21 @@ async fn pull_and_decompress(
 
     // start the download
     download_progress.set_message(file_name.clone());
+    let progress = download_progress.clone();
     let download_stream = StreamReader::new(
         client
             .pull_blob_stream(reference, layer)
             .await?
             .stream
-            .and_then(|bytes| {
+            .and_then(move |bytes| {
                 if bytes.len() > 0 {
-                    download_progress.inc(bytes.len() as u64);
+                    progress.inc(bytes.len() as u64);
                 }
                 futures_util::future::ok(bytes)
             }),
     );
 
-    let mut decoder = Decompressor::from((compression, download_stream));
+    let mut decoder = compression.decompressor(download_stream);
 
     // write stream to file
     let _ = tokio::io::copy(&mut decoder, &mut file).await?;
