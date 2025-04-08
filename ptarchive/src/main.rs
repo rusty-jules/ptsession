@@ -1,6 +1,7 @@
 mod annotations;
 mod args;
 mod client;
+mod compression;
 mod info;
 mod pull;
 mod push;

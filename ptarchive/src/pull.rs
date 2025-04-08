@@ -1,6 +1,7 @@
 use crate::annotations::*;
-use crate::args::{Compression, PullArgs};
+use crate::args::PullArgs;
 use crate::client::HttpClient;
+use crate::compression::Compression;
 
 use std::convert::TryFrom;
 use std::fmt::Write;

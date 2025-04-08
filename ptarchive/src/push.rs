@@ -1,6 +1,7 @@
 use crate::annotations::*;
-use crate::args::{Compression, PushArgs};
+use crate::args::PushArgs;
 use crate::client::HttpClient;
+use crate::compression::Compression;
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
