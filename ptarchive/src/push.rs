@@ -14,11 +14,11 @@ use std::task::{Context, Poll};
 
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use oci_client::manifest::OciDescriptor;
 use oci_client::{
     annotations::{ORG_OPENCONTAINERS_IMAGE_CREATED, ORG_OPENCONTAINERS_IMAGE_TITLE},
     client::{ClientConfig, Config, PushResponse},
-    manifest::{OciImageManifest, OCI_IMAGE_MEDIA_TYPE},
+    errors::OciDistributionError,
+    manifest::{OciDescriptor, OciImageManifest, OCI_IMAGE_MEDIA_TYPE},
     secrets::RegistryAuth,
     Reference,
 };
@@ -353,8 +353,16 @@ async fn fetch_original_digests(
     reference: &Reference,
     auth: &RegistryAuth,
 ) -> Result<BTreeMap<String, OciDescriptor>, Box<dyn std::error::Error + Send + Sync>> {
-    let tags = client.list_tags(&reference, &auth, None, None).await?;
-    futures_util::stream::iter(tags.tags.into_iter())
+    let tags = client.list_tags(&reference, &auth, None, None).await;
+
+    // if the repository doesn't exist return empty map of digests
+    if let Err(OciDistributionError::RegistryError { .. }) = tags {
+        return Ok(BTreeMap::new());
+    } else if let Err(e) = tags {
+        return Err(e.into());
+    }
+
+    futures_util::stream::iter(tags.unwrap().tags.into_iter())
         .map(|tag| {
             let a = auth.clone();
             let c = client.clone();
@@ -363,19 +371,26 @@ async fn fetch_original_digests(
             async move {
                 let reference =
                     Reference::with_tag(r.registry().to_string(), r.repository().to_string(), tag);
-                let (manifest, _) = c.pull_image_manifest(&reference, &a).await?;
-                let digests = manifest
-                    .layers
-                    .into_iter()
-                    .filter_map(|layer| match &layer.annotations {
-                        None => None,
-                        Some(annotations) => match annotations.get(IO_PTSESSION_ORIGINAL_DIGEST) {
+                match c.pull_image_manifest(&reference, &a).await {
+                    Ok((manifest, _)) => Ok(manifest
+                        .layers
+                        .into_iter()
+                        .filter_map(|layer| match &layer.annotations {
                             None => None,
-                            Some(digest) => Some((digest.clone(), layer)),
-                        },
-                    })
-                    .collect::<BTreeMap<String, OciDescriptor>>();
-                Ok::<_, Box<dyn ::std::error::Error + Sync + Send>>(digests)
+                            Some(annotations) => {
+                                match annotations.get(IO_PTSESSION_ORIGINAL_DIGEST) {
+                                    None => None,
+                                    Some(digest) => Some((digest.clone(), layer)),
+                                }
+                            }
+                        })
+                        .collect::<BTreeMap<String, OciDescriptor>>()),
+                    Err(e) => match e {
+                        OciDistributionError::ImageManifestNotFoundError(_)
+                        | OciDistributionError::RegistryError { .. } => Ok(BTreeMap::new()),
+                        e => Err(e.into()),
+                    },
+                }
             }
         })
         .buffer_unordered(10)
