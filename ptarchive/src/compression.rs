@@ -1,6 +1,8 @@
 use crate::annotations::MediaType;
 
 use std::convert::TryFrom;
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 
 use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
 use async_compression::tokio::bufread::{GzipEncoder, XzEncoder, ZstdEncoder};
@@ -19,6 +21,56 @@ pub enum Compression {
     GZIP,
     /// None
     None,
+}
+
+// The benefits of enum variants over Box<dyn Trait> are many when:
+//
+// - all possible variants are known at compile time
+// - only one variant is used per execution
+// - the variant's methods are in the hot path and frequently called
+// - the size difference of the variant structs are neglibile
+//
+// This comes at the cost of code amount and thus legibility.
+impl Compression {
+    pub fn compressor<R: AsyncBufRead + Unpin + Send + Sync + 'static>(
+        self,
+        reader: R,
+    ) -> Compressor<R> {
+        Compressor::from((self, reader))
+    }
+
+    pub fn decompressor<R: AsyncBufRead + Unpin + Send + 'static>(
+        self,
+        reader: R,
+    ) -> Decompressor<R> {
+        Decompressor::from((self, reader))
+    }
+
+    #[allow(dead_code)]
+    pub fn dyn_compressor<R: AsyncBufRead + Unpin + Send + Sync + 'static>(
+        &self,
+        reader: R,
+    ) -> Box<dyn AsyncRead + Unpin + Send + Sync> {
+        match self {
+            Compression::XZ => Box::new(XzEncoder::new(reader)),
+            Compression::ZSTD => Box::new(ZstdEncoder::new(reader)),
+            Compression::GZIP => Box::new(GzipEncoder::new(reader)),
+            Compression::None => Box::new(reader),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn dyn_decompressor<R: AsyncBufRead + Unpin + Send + 'static>(
+        self,
+        reader: R,
+    ) -> Box<dyn AsyncRead + Unpin + Send> {
+        match self {
+            Compression::XZ => Box::new(XzDecoder::new(reader)),
+            Compression::ZSTD => Box::new(ZstdDecoder::new(reader)),
+            Compression::GZIP => Box::new(GzipDecoder::new(reader)),
+            Compression::None => Box::new(reader),
+        }
+    }
 }
 
 impl ToString for Compression {
@@ -49,28 +101,137 @@ impl<'a> TryFrom<MediaType<'a>> for Compression {
     }
 }
 
-impl Compression {
-    pub fn compressor<R: AsyncBufRead + Unpin + Send + Sync + 'static>(
-        &self,
-        reader: R,
-    ) -> Box<dyn AsyncRead + Unpin + Send + Sync> {
-        match self {
-            Compression::XZ => Box::new(XzEncoder::new(reader)),
-            Compression::ZSTD => Box::new(ZstdEncoder::new(reader)),
-            Compression::GZIP => Box::new(GzipEncoder::new(reader)),
-            Compression::None => Box::new(reader),
+pub enum CompressorEncoder<R: AsyncRead + AsyncBufRead + Unpin> {
+    XZ(XzEncoder<R>),
+    ZSTD(ZstdEncoder<R>),
+    GZIP(GzipEncoder<R>),
+    None(R),
+}
+
+pub struct Compressor<R>
+where
+    R: AsyncRead + AsyncBufRead + Unpin,
+{
+    encoder: CompressorEncoder<R>,
+}
+
+impl<R> AsyncRead for Compressor<R>
+where
+    R: AsyncRead + AsyncBufRead + Unpin,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut self.encoder {
+            CompressorEncoder::XZ(encoder) => Pin::new(encoder).poll_read(cx, buf),
+            CompressorEncoder::ZSTD(encoder) => Pin::new(encoder).poll_read(cx, buf),
+            CompressorEncoder::GZIP(encoder) => Pin::new(encoder).poll_read(cx, buf),
+            CompressorEncoder::None(encoder) => Pin::new(encoder).poll_read(cx, buf),
         }
     }
+}
 
-    pub fn decompressor<R: AsyncBufRead + Unpin + Send + 'static>(
-        &self,
-        reader: R,
-    ) -> Box<dyn AsyncRead + Unpin + Send> {
-        match self {
-            Compression::XZ => Box::new(XzDecoder::new(reader)),
-            Compression::ZSTD => Box::new(ZstdDecoder::new(reader)),
-            Compression::GZIP => Box::new(GzipDecoder::new(reader)),
-            Compression::None => Box::new(reader),
+impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R)> for Compressor<R> {
+    fn from((compression, reader): (Compression, R)) -> Self {
+        match compression {
+            Compression::XZ => Self {
+                encoder: CompressorEncoder::XZ(XzEncoder::new(reader)),
+            },
+            Compression::ZSTD => Self {
+                encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(reader)),
+            },
+            Compression::GZIP => Self {
+                encoder: CompressorEncoder::GZIP(GzipEncoder::new(reader)),
+            },
+            Compression::None => Self {
+                encoder: CompressorEncoder::None(reader),
+            },
+        }
+    }
+}
+
+pub struct Decompressor<R>
+where
+    R: AsyncRead + AsyncBufRead + Unpin,
+{
+    decoder: DecompressorDecoder<R>,
+}
+
+impl<R> AsyncRead for Decompressor<R>
+where
+    R: AsyncRead + AsyncBufRead + Unpin,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut self.decoder {
+            DecompressorDecoder::XZ(decoder) => Pin::new(decoder).poll_read(cx, buf),
+            DecompressorDecoder::ZSTD(decoder) => Pin::new(decoder).poll_read(cx, buf),
+            DecompressorDecoder::GZIP(decoder) => Pin::new(decoder).poll_read(cx, buf),
+            DecompressorDecoder::None(decoder) => Pin::new(decoder).poll_read(cx, buf),
+        }
+    }
+}
+
+pub enum DecompressorDecoder<R>
+where
+    R: AsyncRead + AsyncBufRead + Unpin,
+{
+    XZ(XzDecoder<R>),
+    ZSTD(ZstdDecoder<R>),
+    GZIP(GzipDecoder<R>),
+    None(R),
+}
+
+impl<R> Deref for Decompressor<R>
+where
+    R: AsyncRead + AsyncBufRead + Unpin + Send + Sync + 'static,
+{
+    type Target = dyn AsyncRead + Unpin + Send + Sync;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.decoder {
+            DecompressorDecoder::XZ(decoder) => decoder,
+            DecompressorDecoder::ZSTD(decoder) => decoder,
+            DecompressorDecoder::GZIP(decoder) => decoder,
+            DecompressorDecoder::None(decoder) => decoder,
+        }
+    }
+}
+
+impl<R> DerefMut for Decompressor<R>
+where
+    R: AsyncRead + AsyncBufRead + Unpin + Send + Sync + 'static,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.decoder {
+            DecompressorDecoder::XZ(decoder) => decoder,
+            DecompressorDecoder::ZSTD(decoder) => decoder,
+            DecompressorDecoder::GZIP(decoder) => decoder,
+            DecompressorDecoder::None(decoder) => decoder,
+        }
+    }
+}
+
+impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R)> for Decompressor<R> {
+    fn from((compression, reader): (Compression, R)) -> Self {
+        match compression {
+            Compression::XZ => Self {
+                decoder: DecompressorDecoder::XZ(XzDecoder::new(reader)),
+            },
+            Compression::ZSTD => Self {
+                decoder: DecompressorDecoder::ZSTD(ZstdDecoder::new(reader)),
+            },
+            Compression::GZIP => Self {
+                decoder: DecompressorDecoder::GZIP(GzipDecoder::new(reader)),
+            },
+            Compression::None => Self {
+                decoder: DecompressorDecoder::None(reader),
+            },
         }
     }
 }
