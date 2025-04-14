@@ -7,7 +7,6 @@ use crate::style::{DOWNLOAD_STYLE, FAILED_STYLE, FINISH_STYLE};
 use std::convert::TryFrom;
 use std::fs::FileTimes;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::SystemTime;
 
 use chrono::DateTime;
@@ -33,6 +32,7 @@ async fn pull_and_decompress(
     target_dir: Option<PathBuf>,
     download_progress: ProgressBar,
     compression: Compression,
+    _unpack: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // setup target file
     let mut file_path = target_dir.unwrap_or(PathBuf::new());
@@ -141,7 +141,7 @@ pub async fn pull(
     let mut layers = manifest.layers;
     layers.push(manifest.config);
     let _: Vec<()> = stream::iter(layers)
-        .map(|mut layer| {
+        .map(|layer| {
             // clone inputs
             let client = client.clone();
             let reference = reference.clone();
@@ -149,14 +149,18 @@ pub async fn pull(
             let multi_progress = multi_progress.clone();
 
             // parse layer annotations
-            let mut annotations = layer.annotations.take().expect("layer as annotations");
-            let file_name = annotations
-                .remove(ORG_OPENCONTAINERS_IMAGE_TITLE)
-                .expect("layer as title");
-            let unpack: Result<bool, <bool as FromStr>::Err> = annotations
-                .remove(IO_DEIS_ORAS_CONTENT_UNPACK)
-                .unwrap_or("false".to_string())
-                .parse();
+            let file_name = layer
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(ORG_OPENCONTAINERS_IMAGE_TITLE))
+                .expect("layer has title")
+                .clone();
+            let unpack: bool = layer
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(IO_DEIS_ORAS_CONTENT_UNPACK))
+                .and_then(|unpack| unpack.parse().ok())
+                .unwrap_or(false);
 
             // parse layer config
             let size = layer.size as u64;
@@ -166,18 +170,7 @@ pub async fn pull(
             async move {
                 let download_progress = multi_progress.add(ProgressBar::new(0));
 
-                if unpack.is_err() {
-                    let err = unpack.unwrap_err();
-                    download_progress.set_style(ProgressStyle::clone(&*FAILED_STYLE));
-                    download_progress.finish_with_message(format!(
-                        "Unknown unpack annotation value for {file_name}: {}",
-                        err.to_string()
-                    ));
-                    return Err(err.into());
-                }
-
-                if compression.is_err() {
-                    let err = compression.unwrap_err();
+                if let Err(err) = compression {
                     download_progress.set_style(ProgressStyle::clone(&*FAILED_STYLE));
                     download_progress.finish_with_message(format!(
                         "Unknown compression type for {file_name}: {}",
@@ -197,6 +190,7 @@ pub async fn pull(
                     target_dir,
                     download_progress,
                     compression.unwrap(),
+                    unpack,
                 )
                 .await?;
 
