@@ -2,11 +2,11 @@ use crate::annotations::*;
 use crate::args::PushArgs;
 use crate::client::HttpClient;
 use crate::compression::Compression;
+use crate::meta::file_meta;
 use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use async_compression::Level;
-use chrono::DateTime;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::{
@@ -108,67 +107,6 @@ impl<R: AsyncRead + AsyncBufRead + Unpin> AsyncBufRead for DigestReader<R> {
         let this = self.get_mut();
         Pin::new(&mut this.inner).poll_fill_buf(cx)
     }
-}
-
-#[cfg(target_os = "macos")]
-async fn file_meta(
-    file: File,
-) -> Result<(File, u64, String, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
-    use std::{os::macos::fs::MetadataExt, time::UNIX_EPOCH};
-    let std_file = file.into_std().await;
-
-    let file_meta = std_file.metadata()?;
-    let file_size = file_meta.size();
-    let birthtime = file_meta.st_birthtime();
-    let modified = file_meta.modified();
-
-    // drop nanoseconds
-    let file_created = DateTime::from_timestamp(birthtime, 0)
-        .ok_or("could not determine file timestamp")?
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-
-    let file_modified = modified
-        .map(|modified| {
-            DateTime::from_timestamp(
-                modified
-                    .duration_since(UNIX_EPOCH)
-                    .expect("system time since unix epoch")
-                    .as_secs() as i64,
-                0,
-            )
-            .expect("could not parse modified timestamp")
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        })
-        .ok();
-
-    // WARNING: as said in the docs, File::from_std could block,
-    // but tokio doesn't seem to have darwin MetadataExt so we
-    // don't have much of a choice
-    Ok((
-        File::from_std(std_file),
-        file_size,
-        file_created,
-        file_modified,
-    ))
-}
-
-#[cfg(target_os = "linux")]
-async fn file_meta(
-    file: File,
-) -> Result<(File, u64, String), Box<dyn std::error::Error + Send + Sync>> {
-    let file_meta = file.metadata().await?;
-    let file_size = file_meta.len();
-    let file_changed = file_meta.ctime();
-    let file_created = DateTime::from_timestamp(file_changed, 0)
-        .ok_or("could not determine file timestamp")?
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-
-    Ok((file, file_size, file_created))
-}
-
-#[cfg(target_os = "windows")]
-fn file_meta(file: &File) {
-    unimplemented!()
 }
 
 async fn begin_push_chunked_session(
@@ -601,8 +539,8 @@ pub async fn push(
                 Ok::<_, Box<dyn std::error::Error + Sync + Send>>(result)
             }
         })
-        .buffer_unordered(parallelism) // Process up to parallelism files at a time
-        .try_collect() // Collect the results
+        .buffer_unordered(parallelism)
+        .try_collect()
         .await?;
 
     println!("Creating manifest for {} layers", layers.len());
