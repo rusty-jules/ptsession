@@ -5,11 +5,15 @@ use crate::compression::Compression;
 use crate::style::{DOWNLOAD_STYLE, FAILED_STYLE, FINISH_STYLE};
 
 use std::convert::TryFrom;
+use std::fs::FileTimes;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::SystemTime;
 
+use chrono::DateTime;
 use futures_util::{stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use oci_client::annotations::ORG_OPENCONTAINERS_IMAGE_CREATED;
 use oci_client::manifest::OciDescriptor;
 use oci_client::{
     annotations::ORG_OPENCONTAINERS_IMAGE_TITLE,
@@ -59,6 +63,44 @@ async fn pull_and_decompress(
     // write stream to file
     let _ = tokio::io::copy(&mut decoder, &mut file).await?;
     file.flush().await?;
+
+    // set the file created time
+    let file = file.into_std().await;
+    let now = SystemTime::now();
+    let annotations = layer
+        .annotations
+        .as_ref()
+        .expect("layer annotations expected");
+    let created: SystemTime = annotations
+        .get(ORG_OPENCONTAINERS_IMAGE_CREATED)
+        .ok_or("org.opencontainers.image.created annotation expected")
+        .map_or(now, |created| {
+            DateTime::parse_from_rfc3339(created)
+                .expect("parse org.opencontainers.image.created as rfc3339")
+                .into()
+        });
+    let modified: Option<SystemTime> =
+        annotations.get(IO_PTSESSION_TIME_MODIFIED).map(|modified| {
+            DateTime::parse_from_rfc3339(modified)
+                .expect("parse io.ptsession.time.modified as rfc3339")
+                .into()
+        });
+
+    let filetimes = if cfg!(target_os = "macos") {
+        use std::os::macos::fs::FileTimesExt;
+        FileTimes::new()
+            .set_created(created)
+            .set_modified(modified.unwrap_or(now))
+    } else if cfg!(target_os = "linux") {
+        FileTimes::new().set_modified(modified.unwrap_or(created))
+    } else if cfg!(target_os = "windows") {
+        unimplemented!();
+    } else {
+        unimplemented!()
+    };
+
+    file.set_times(filetimes)?;
+
     download_progress.set_style(ProgressStyle::clone(&*FINISH_STYLE));
     download_progress.finish();
 

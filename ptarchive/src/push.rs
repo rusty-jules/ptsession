@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use async_compression::Level;
+use chrono::DateTime;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::{
@@ -107,6 +108,67 @@ impl<R: AsyncRead + AsyncBufRead + Unpin> AsyncBufRead for DigestReader<R> {
         let this = self.get_mut();
         Pin::new(&mut this.inner).poll_fill_buf(cx)
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn file_meta(
+    file: File,
+) -> Result<(File, u64, String, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
+    use std::{os::macos::fs::MetadataExt, time::UNIX_EPOCH};
+    let std_file = file.into_std().await;
+
+    let file_meta = std_file.metadata()?;
+    let file_size = file_meta.size();
+    let birthtime = file_meta.st_birthtime();
+    let modified = file_meta.modified();
+
+    // drop nanoseconds
+    let file_created = DateTime::from_timestamp(birthtime, 0)
+        .ok_or("could not determine file timestamp")?
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let file_modified = modified
+        .map(|modified| {
+            DateTime::from_timestamp(
+                modified
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time since unix epoch")
+                    .as_secs() as i64,
+                0,
+            )
+            .expect("could not parse modified timestamp")
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        })
+        .ok();
+
+    // WARNING: as said in the docs, File::from_std could block,
+    // but tokio doesn't seem to have darwin MetadataExt so we
+    // don't have much of a choice
+    Ok((
+        File::from_std(std_file),
+        file_size,
+        file_created,
+        file_modified,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+async fn file_meta(
+    file: File,
+) -> Result<(File, u64, String), Box<dyn std::error::Error + Send + Sync>> {
+    let file_meta = file.metadata().await?;
+    let file_size = file_meta.len();
+    let file_changed = file_meta.ctime();
+    let file_created = DateTime::from_timestamp(file_changed, 0)
+        .ok_or("could not determine file timestamp")?
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    Ok((file, file_size, file_created))
+}
+
+#[cfg(target_os = "windows")]
+fn file_meta(file: &File) {
+    unimplemented!()
 }
 
 async fn begin_push_chunked_session(
@@ -258,18 +320,13 @@ async fn compress_and_upload(
     let file = File::open(file_path).await?;
 
     // Get file meta
-    let file_meta = file.metadata().await?;
-    let file_size = file_meta.len();
+    let (file, file_size, file_created, file_modified) = file_meta(file).await?;
     compression_progress.set_length(file_size);
-
-    // Get file timestamp
-    let file_created = chrono::DateTime::from_timestamp(file_meta.ctime(), 0)
-        .ok_or("could not determine file timestamp")?
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     // Create digest reader to calculate original file digest
     let mut digest_reader = DigestReader::new(file, None);
     let original_digest_hasher = digest_reader.digest_handle();
+
     // Read the file into memory and compute the digest
     let mut buf = Vec::with_capacity(file_size as usize);
     digest_reader.read_to_end(&mut buf).await?;
@@ -332,7 +389,7 @@ async fn compress_and_upload(
     upload_progress.finish_with_message(format!("Upload complete {file_path}"));
 
     // Output OciDescriptor of the layer
-    let annotations = maplit::btreemap! {
+    let mut annotations = maplit::btreemap! {
         ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.to_string(),
         ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => file_created,
         IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
@@ -340,6 +397,10 @@ async fn compress_and_upload(
         IO_PTSESSION_COMPRESSION_LEVEL.to_string() => level.to_string(),
         IO_DEIS_ORAS_CONTENT_UNPACK.to_string() => "true".to_string()
     };
+
+    if let Some(modified) = file_modified {
+        annotations.insert(IO_PTSESSION_TIME_MODIFIED.to_string(), modified);
+    }
 
     let media_type = match compression {
         Compression::None => "audio/vnd.wav".to_string(),
@@ -413,24 +474,28 @@ async fn push_manifest(
     session: PtSession,
     ptx_file: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
-    let mut ptx = File::open(&ptx_file).await?;
-    let ptx_meta = ptx.metadata().await?;
-    let mut ptx_data = Vec::with_capacity(ptx_meta.len() as usize);
+    let ptx = File::open(&ptx_file).await?;
+    let (mut ptx, ptx_size, ptx_created, ptx_modified) = file_meta(ptx).await?;
+    let mut ptx_data = Vec::with_capacity(ptx_size as usize);
     ptx.read_to_end(&mut ptx_data).await?;
     drop(ptx);
 
     let ptx_filename = ptx_file.file_name().unwrap().to_string_lossy().to_string();
 
+    let mut annotations = maplit::btreemap! {
+        IO_PTSESSION_SAMPLE_RATE.to_string() => session.session_sample_rate.to_string(),
+        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename.clone(),
+        ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => ptx_created,
+    };
+
+    if let Some(modified) = ptx_modified {
+        annotations.insert(IO_PTSESSION_TIME_MODIFIED.to_string(), modified);
+    }
+
     let config = Config {
         data: ptx_data,
         media_type: "application/vnd.avid.ptx".to_string(),
-        annotations: Some(maplit::btreemap! {
-            IO_PTSESSION_SAMPLE_RATE.to_string() => session.session_sample_rate.to_string(),
-            ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename.clone(),
-            ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => chrono::DateTime::from_timestamp(ptx_meta.ctime(), 0)
-                .ok_or("could not determine ptx file timestamp")?
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        }),
+        annotations: Some(annotations),
     };
 
     let manifest = OciImageManifest {
@@ -438,7 +503,7 @@ async fn push_manifest(
         media_type: Some(OCI_IMAGE_MEDIA_TYPE.to_string()),
         artifact_type: Some("application/vnd.avid.ptsession".to_string()),
         config: OciDescriptor {
-            size: ptx_meta.len() as i64,
+            size: ptx_size as i64,
             media_type: config.media_type.clone(),
             digest: config.sha256_digest(),
             annotations: config.annotations.clone(),

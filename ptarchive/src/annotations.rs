@@ -19,5 +19,7 @@ pub const IO_PTSESSION_ORIGINAL_SIZE: &str = "io.ptsession.original.size";
 pub const IO_PTSESSION_SAMPLE_RATE: &str = "io.ptsession.sample_rate";
 /// Compression level for enabling recomputation of compressed digests
 pub const IO_PTSESSION_COMPRESSION_LEVEL: &str = "io.ptsession.compression.level";
+/// Date the file was last modified
+pub const IO_PTSESSION_TIME_MODIFIED: &str = "io.ptsession.time.modified";
 /// Whether to decompress a blob on pull
 pub const IO_DEIS_ORAS_CONTENT_UNPACK: &str = "io.deis.oras.content.unpack";
