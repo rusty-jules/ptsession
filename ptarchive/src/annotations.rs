@@ -17,5 +17,7 @@ pub const IO_PTSESSION_ORIGINAL_DIGEST: &str = "io.ptsession.original.digest";
 pub const IO_PTSESSION_ORIGINAL_SIZE: &str = "io.ptsession.original.size";
 /// Sample rate of a pro tools session config
 pub const IO_PTSESSION_SAMPLE_RATE: &str = "io.ptsession.sample_rate";
+/// Compression level for enabling recomputation of compressed digests
+pub const IO_PTSESSION_COMPRESSION_LEVEL: &str = "io.ptsession.compression.level";
 /// Whether to decompress a blob on pull
 pub const IO_DEIS_ORAS_CONTENT_UNPACK: &str = "io.deis.oras.content.unpack";

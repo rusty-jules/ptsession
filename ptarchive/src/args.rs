@@ -54,8 +54,12 @@ pub struct PushArgs {
     length: bool,
 
     /// Compression algorithm for uploaded files
-    #[arg(short, long, default_value_t = Compression::XZ, value_name = "compression")]
+    #[arg(short, long, default_value_t = Compression::ZSTD, value_name = "compression")]
     pub compression: Compression,
+
+    /// Compression level to use
+    #[arg(long, default_value_t = 7, value_name = "level")]
+    pub level: i32,
 
     /// Maximum number of concurrent uploads
     #[arg(short, long, default_value_t = 5, value_name = "parallelism")]

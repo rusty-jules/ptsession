@@ -6,6 +6,7 @@ use std::pin::Pin;
 
 use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
 use async_compression::tokio::bufread::{GzipEncoder, XzEncoder, ZstdEncoder};
+use async_compression::Level;
 use serde::Serialize;
 use tokio::io::{AsyncBufRead, AsyncRead};
 
@@ -13,9 +14,9 @@ use tokio::io::{AsyncBufRead, AsyncRead};
 #[serde(rename_all = "kebab-case")]
 pub enum Compression {
     /// Compress files to `.xz` format
-    #[default]
     XZ,
     /// Compress files to `.zst` format
+    #[default]
     ZSTD,
     /// Compress files to `.gz` format
     GZIP,
@@ -35,8 +36,9 @@ impl Compression {
     pub fn compressor<R: AsyncBufRead + Unpin + Send + Sync + 'static>(
         self,
         reader: R,
+        level: Option<async_compression::Level>,
     ) -> Compressor<R> {
-        Compressor::from((self, reader))
+        Compressor::from((self, reader, level))
     }
 
     pub fn decompressor<R: AsyncBufRead + Unpin + Send + 'static>(
@@ -133,22 +135,37 @@ where
     }
 }
 
-impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R)> for Compressor<R> {
-    fn from((compression, reader): (Compression, R)) -> Self {
+impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R, Option<Level>)> for Compressor<R> {
+    fn from((compression, reader, level): (Compression, R, Option<Level>)) -> Self {
         match compression {
             Compression::XZ => Self {
-                encoder: CompressorEncoder::XZ(XzEncoder::new(reader)),
+                encoder: CompressorEncoder::XZ(XzEncoder::with_quality(
+                    reader,
+                    level.unwrap_or(Level::Default),
+                )),
             },
             Compression::ZSTD => Self {
-                encoder: CompressorEncoder::ZSTD(ZstdEncoder::new(reader)),
+                encoder: CompressorEncoder::ZSTD(ZstdEncoder::with_quality(
+                    reader,
+                    level.unwrap_or(Level::Default),
+                )),
             },
             Compression::GZIP => Self {
-                encoder: CompressorEncoder::GZIP(GzipEncoder::new(reader)),
+                encoder: CompressorEncoder::GZIP(GzipEncoder::with_quality(
+                    reader,
+                    level.unwrap_or(Level::Default),
+                )),
             },
             Compression::None => Self {
                 encoder: CompressorEncoder::None(reader),
             },
         }
+    }
+}
+
+impl<R: AsyncRead + AsyncBufRead + Unpin> From<(Compression, R)> for Compressor<R> {
+    fn from((compression, reader): (Compression, R)) -> Self {
+        Compressor::from((compression, reader, None))
     }
 }
 

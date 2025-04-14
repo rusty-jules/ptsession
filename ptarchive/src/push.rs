@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use async_compression::Level;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::{
@@ -246,6 +247,7 @@ async fn compress_and_upload(
     reference: &Reference,
     file_path: &str,
     compression: Compression,
+    level: i32,
     compression_progress: ProgressBar,
     upload_progress: ProgressBar,
     pushed_digests: BTreeMap<String, OciDescriptor>,
@@ -279,7 +281,10 @@ async fn compress_and_upload(
     }
 
     // Create compression encoder
-    let encoder = compression.compressor(BufReader::new(Cursor::new(buf)));
+    let encoder = compression.compressor(
+        BufReader::new(Cursor::new(buf)),
+        Some(Level::Precise(level)),
+    );
 
     // Create digest reader to calculate compressed file digest
     let compressed_digest_reader = DigestReader::new(encoder, Some(compression_progress));
@@ -332,6 +337,7 @@ async fn compress_and_upload(
         ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => file_created,
         IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
         IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
+        IO_PTSESSION_COMPRESSION_LEVEL.to_string() => level.to_string(),
         IO_DEIS_ORAS_CONTENT_UNPACK.to_string() => "true".to_string()
     };
 
@@ -459,6 +465,7 @@ pub async fn push(
     session: PtSession,
     PushArgs {
         compression,
+        level,
         parallelism,
         ptx_file,
         ..
@@ -519,6 +526,7 @@ pub async fn push(
                     &reference,
                     &file_path,
                     compression,
+                    level,
                     compression_progress,
                     upload_progress,
                     original_digests,
