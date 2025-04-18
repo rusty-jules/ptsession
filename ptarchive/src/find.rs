@@ -16,6 +16,83 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
 
+/// Filter out directories from ignore
+fn filter_files(entry: DirEntry) -> Option<(String, PathBuf)> {
+    if entry.file_type().unwrap().is_file() {
+        let path = entry.into_path();
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap();
+        Some((name, path))
+    } else {
+        None
+    }
+}
+
+// TODO: ignore filenames (only length & unique id?)
+fn by_file_name(
+    missing_set: Arc<Mutex<HashSet<String>>>,
+    file_name: bool,
+) -> impl FnMut(&(String, PathBuf)) -> bool {
+    move |(name, path): &(String, PathBuf)| -> bool {
+        if file_name {
+            return missing_set
+                .lock()
+                .expect("get missing set lock")
+                .contains(name);
+        }
+        true
+    }
+}
+
+fn by_file_length(
+    missing_lengths: HashMap<String, usize>,
+    length: bool,
+) -> impl FnMut(&(String, PathBuf)) -> bool {
+    move |(name, path): &(String, PathBuf)| -> bool {
+        let len = *missing_lengths
+            .get(name)
+            .expect("missing file to have length in ptsession") as u64;
+        let meta_len = std::fs::metadata(path).expect("to get file metadata").len();
+        let len_matches = meta_len == len;
+        if length {
+            len_matches
+        } else {
+            if !length && !len_matches {
+                println!("🚨 Warning: {name} has mismatched file length, but length is being ignored for matching");
+            }
+            true
+        }
+    }
+}
+
+// TODO: filter by pt unique id
+fn by_file_unique_id(unique_id: bool) -> impl FnMut(&(String, PathBuf)) -> bool {
+    |(name, path): &(String, PathBuf)| -> bool { unimplemented!() }
+}
+
+fn remove_from_missing(
+    missing_set: Arc<Mutex<HashSet<String>>>,
+) -> impl FnMut((String, PathBuf)) -> (String, PathBuf) {
+    move |(name, path): (String, PathBuf)| -> (String, PathBuf) {
+        let existed = missing_set
+            .lock()
+            .expect("get missing files set lock")
+            .remove(&name);
+        if !existed {
+            println!("Received a file that did not exist in the missing set");
+        }
+        println!("✅ Found file: {}", path.display());
+        (name, path)
+    }
+}
+
+fn format_name_to_artifact_path((name, path): (String, PathBuf)) -> (String, PathBuf) {
+    // NOTE: not sure if "Audio Files" should be prepended here
+    (format!("Audio Files/{name}"), path)
+}
+
 pub async fn find_files(
     session: &PtSession,
     missing_files: Vec<String>,
@@ -103,60 +180,12 @@ pub async fn find_files(
         ..
     } = find_args;
 
-    // TODO: ignore filenames (only length & unique id?)
-    // Closures below are fed into adapters with captured config variables
-    let by_file_name = |(name, path): &(String, PathBuf)| -> bool {
-        if file_name {
-            return missing_set
-                .lock()
-                .expect("get missing set lock")
-                .contains(name);
-        }
-        true
-    };
-
-    // TODO: filter by length
-    let by_file_length = |(name, path): &(String, PathBuf)| -> bool {
-        let len = *missing_lengths
-            .get(name)
-            .expect("missing file to have length in ptsession") as u64;
-        let meta_len = std::fs::metadata(path).expect("to get file metadata").len();
-        let len_matches = meta_len == len;
-        if length {
-            len_matches
-        } else {
-            if !length && !len_matches {
-                println!("🚨 Warning: {name} has mismatched file length, but length is being ignored for matching");
-            }
-            true
-        }
-    };
-
-    // TODO: filter by pt unique id
-    let by_file_unique_id = |(name, path): &(String, PathBuf)| -> bool { unimplemented!() };
-
-    let remove_from_missing = |(name, path): (String, PathBuf)| -> (String, PathBuf) {
-        let existed = missing_set
-            .lock()
-            .expect("get missing files set lock")
-            .remove(&name);
-        if !existed {
-            println!("Received a file that did not exist in the missing set");
-        }
-        println!("✅ Found file: {}", path.display());
-        (name, path)
-    };
-
-    let format_name_to_artifact_path = |(name, path): (String, PathBuf)| -> (String, PathBuf) {
-        // NOTE: not sure if "Audio Files" should be prepended here
-        (format!("Audio Files/{name}"), path)
-    };
-
     let found_files: Vec<(String, PathBuf)> = ReceiverStream::new(rx)
         .filter_map(filter_files)
-        .filter(by_file_name)
-        .filter(by_file_length)
-        .map(remove_from_missing)
+        .filter(by_file_name(missing_set.clone(), file_name))
+        .filter(by_file_length(missing_lengths, length))
+        //.filter(by_file_unique_id(unique_id))
+        .map(remove_from_missing(missing_set.clone()))
         .map(format_name_to_artifact_path)
         .collect()
         .await;
@@ -171,18 +200,4 @@ pub async fn find_files(
     }
 
     Ok(found_files)
-}
-
-/// Filter out directories from ignore
-fn filter_files(entry: DirEntry) -> Option<(String, PathBuf)> {
-    if entry.file_type().unwrap().is_file() {
-        let path = entry.into_path();
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap();
-        Some((name, path))
-    } else {
-        None
-    }
 }
