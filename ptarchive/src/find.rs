@@ -6,6 +6,7 @@ use crate::FindArgs;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::{borrow::Cow, collections::HashSet};
 
@@ -33,16 +34,12 @@ fn filter_files(entry: DirEntry) -> Option<(String, PathBuf)> {
 // TODO: ignore filenames (only length & unique id?)
 fn by_file_name(
     missing_set: Arc<Mutex<HashSet<String>>>,
-    file_name: bool,
 ) -> impl FnMut(&(String, PathBuf)) -> bool {
     move |(name, path): &(String, PathBuf)| -> bool {
-        if file_name {
-            return missing_set
-                .lock()
-                .expect("get missing set lock")
-                .contains(name);
-        }
-        true
+        missing_set
+            .lock()
+            .expect("get missing set lock")
+            .contains(name)
     }
 }
 
@@ -68,7 +65,7 @@ fn by_file_length(
 }
 
 // TODO: filter by pt unique id
-fn by_file_unique_id(unique_id: bool) -> impl FnMut(&(String, PathBuf)) -> bool {
+fn by_file_unique_id() -> impl FnMut(&(String, PathBuf)) -> bool {
     |(name, path): &(String, PathBuf)| -> bool { unimplemented!() }
 }
 
@@ -99,7 +96,7 @@ pub async fn find_files(
     parallelism: usize,
     find_args: FindArgs,
 ) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
-    if find_args.ignore_missing {
+    if find_args.ignore_missing || missing_files.is_empty() {
         return Ok(vec![]);
     }
 
@@ -180,11 +177,20 @@ pub async fn find_files(
         ..
     } = find_args;
 
-    let found_files: Vec<(String, PathBuf)> = ReceiverStream::new(rx)
-        .filter_map(filter_files)
-        .filter(by_file_name(missing_set.clone(), file_name))
-        .filter(by_file_length(missing_lengths, length))
-        //.filter(by_file_unique_id(unique_id))
+    let mut files_stream: Pin<Box<dyn Stream<Item = (String, PathBuf)>>> =
+        Box::pin(ReceiverStream::new(rx).filter_map(filter_files));
+
+    if file_name {
+        files_stream = Box::pin(files_stream.filter(by_file_name(missing_set.clone())));
+    }
+
+    files_stream = Box::pin(files_stream.filter(by_file_length(missing_lengths, length)));
+
+    if unique_id {
+        files_stream = Box::pin(files_stream.filter(by_file_unique_id()));
+    }
+
+    let found_files: Vec<(String, PathBuf)> = files_stream
         .map(remove_from_missing(missing_set.clone()))
         .map(format_name_to_artifact_path)
         .collect()
@@ -198,6 +204,8 @@ pub async fn find_files(
             println!("❌ {name} could not be found");
         }
     }
+
+    std::process::exit(1);
 
     Ok(found_files)
 }
