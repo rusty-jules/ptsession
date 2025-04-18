@@ -32,27 +32,6 @@ pub struct PushArgs {
     #[arg(value_name = "ptx")]
     pub ptx_file: PathBuf,
 
-    /// Ignore missing session files
-    // TODO: make exclusive with arguments below
-    #[arg(short, long, action, value_name = "ignore-missing")]
-    ignore_missing: bool,
-
-    /// File paths to search for files in
-    #[arg(short, long, value_delimiter = ' ', num_args = 1.., value_name = "search-paths", )]
-    search_path: Option<Vec<String>>,
-
-    /// Find by filename
-    #[arg(short, long, default_value_t = true, value_name = "filename")]
-    file_name: bool,
-
-    /// Find by unique id
-    #[arg(short, long, default_value_t = true, value_name = "unique-id")]
-    unique_id: bool,
-
-    /// Find by length
-    #[arg(short, long, default_value_t = true, value_name = "length")]
-    length: bool,
-
     /// Compression algorithm for uploaded files
     #[arg(short, long, default_value_t = Compression::ZSTD, value_name = "compression")]
     pub compression: Compression,
@@ -64,6 +43,38 @@ pub struct PushArgs {
     /// Maximum number of concurrent uploads
     #[arg(short, long, default_value_t = 5, value_name = "parallelism")]
     pub parallelism: usize,
+
+    #[command(flatten)]
+    pub find_args: FindArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct FindArgs {
+    /// Ignore missing session files
+    // TODO: make exclusive with arguments below
+    #[arg(short, long, action, value_name = "ignore-missing")]
+    pub ignore_missing: bool,
+
+    /// File paths to search for files in
+    #[arg(short, long, value_delimiter = ' ', num_args = 1.., value_name = "search-paths", )]
+    pub search_path: Option<Vec<String>>,
+
+    /// If search_paths is not passed, the maximum folder depth of folders to search for files in
+    /// above and below and target session file's folder
+    #[arg(short, long, default_value_t = 1, value_name = "depth")]
+    pub depth: usize,
+
+    /// Find by filename
+    #[arg(short, long, default_value_t = true, value_name = "filename")]
+    pub file_name: bool,
+
+    /// Find by unique id
+    #[arg(short, long, default_value_t = true, value_name = "unique-id")]
+    pub unique_id: bool,
+
+    /// Find by length
+    #[arg(short, long, default_value_t = false, value_name = "length")]
+    pub length: bool,
 }
 
 #[derive(Debug, Args)]
@@ -103,7 +114,7 @@ pub struct InfoArgs {
 #[group(multiple = false)]
 pub struct InfoPrintArgs {
     /// Output text
-    #[arg(short, long, action)]
+    #[arg(long, action)]
     pub text: bool,
 
     /// Output table

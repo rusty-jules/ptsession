@@ -2,6 +2,7 @@ use crate::annotations::*;
 use crate::args::PushArgs;
 use crate::client::HttpClient;
 use crate::compression::Compression;
+use crate::find::find_files;
 use crate::meta::file_meta;
 use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 
@@ -245,7 +246,8 @@ async fn end_push_chunked_session(
 async fn compress_and_upload(
     client: &oci_client::Client,
     reference: &Reference,
-    file_path: &str,
+    file_name: String,
+    file_path: &Path,
     compression: Compression,
     level: i32,
     compression_progress: ProgressBar,
@@ -270,8 +272,8 @@ async fn compress_and_upload(
     digest_reader.read_to_end(&mut buf).await?;
     let original_digest = original_digest_hasher.lock().unwrap().clone().finalize();
     if let Some(descriptor) = pushed_digests.get(&format!("sha256:{:x}", original_digest)) {
-        compression_progress.finish_with_message(format!("Exists {file_path}"));
-        upload_progress.finish_with_message(format!("Exists {file_path}"));
+        compression_progress.finish_with_message(format!("Exists {file_name}"));
+        upload_progress.finish_with_message(format!("Exists {file_name}"));
         return Ok(descriptor.clone());
     }
 
@@ -301,7 +303,7 @@ async fn compress_and_upload(
     let location = begin_push_chunked_session(&http_client, reference).await?;
 
     // Set up upload progress bar
-    upload_progress.set_message(format!("Uploading {file_path}"));
+    upload_progress.set_message(format!("Uploading {file_name}"));
     push_stream(&http_client, &location, &reference, chunk_stream).await?;
 
     // Get final compressed digest and size
@@ -324,11 +326,11 @@ async fn compress_and_upload(
         end_push_chunked_session(&http_client, &location, reference, &compressed_digest).await?;
 
     // Mark progress bars as complete
-    upload_progress.finish_with_message(format!("Upload complete {file_path}"));
+    upload_progress.finish_with_message(format!("Upload complete {file_name}"));
 
     // Output OciDescriptor of the layer
     let mut annotations = maplit::btreemap! {
-        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.to_string(),
+        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_name,
         ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => file_created,
         IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
         IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
@@ -471,23 +473,32 @@ pub async fn push(
         level,
         parallelism,
         ptx_file,
-        ..
+        find_args,
+        repository: _,
     }: PushArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let file_names = session
+    let (file_names, missing_files): (Vec<String>, Vec<String>) = session
         .audio_files
         .iter()
         .map(|Wav { file_name, .. }: &Wav| format!("Audio Files/{file_name}"))
-        // TODO: find files
-        .filter(|file_name| {
+        .partition(|file_name| {
             if !std::fs::exists(file_name).unwrap() {
-                println!("❌ {file_name} does not exist");
+                println!("❌ {file_name} not in Audio Files folder");
                 false
             } else {
                 true
             }
-        })
-        .collect::<Vec<String>>();
+        });
+
+    let all_files: Vec<(String, PathBuf)> = file_names
+        .into_iter()
+        .map(|file_name| (file_name.clone(), PathBuf::from(file_name)))
+        .chain(
+            find_files(&session, missing_files, parallelism, find_args)
+                .await?
+                .into_iter(),
+        )
+        .collect();
 
     let client = oci_client::Client::new(ClientConfig {
         protocol: oci_client::client::ClientProtocol::Http,
@@ -504,16 +515,14 @@ pub async fn push(
     // Process all files in parallel with progress reporting
     println!("Processing audio files with parallelism: {}", parallelism);
 
-    let layers: Vec<OciDescriptor> = futures_util::stream::iter(file_names)
-        .map(|file_path| {
+    let layers: Vec<OciDescriptor> = futures_util::stream::iter(all_files)
+        .map(|(file_name, file_path)| {
             let client = client.clone();
             let reference = reference.clone();
             let multi_progress = multi_progress.clone();
             let original_digests = original_digests.clone();
 
             async move {
-                let file_name = Path::new(&file_path).to_string_lossy().to_string();
-
                 // Create progress bars for this file
                 let compression_progress = multi_progress.add(ProgressBar::new(0));
                 compression_progress.set_style(ProgressStyle::clone(&*COMPRESSION_STYLE));
@@ -527,6 +536,7 @@ pub async fn push(
                 let result = compress_and_upload(
                     &client,
                     &reference,
+                    file_name,
                     &file_path,
                     compression,
                     level,
