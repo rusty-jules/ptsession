@@ -56,25 +56,25 @@ pub struct FindArgs {
     pub ignore_missing: bool,
 
     /// File paths to search for files in
-    #[arg(short, long, value_delimiter = ' ', num_args = 1.., value_name = "search-paths", )]
-    pub search_path: Option<Vec<String>>,
+    #[arg(short, long, default_value = ".", num_args = 1.., value_name = "search-paths")]
+    pub search_paths: Vec<String>,
 
     /// If search_paths is not passed, the maximum folder depth of folders to search for files in
     /// above and below and target session file's folder
     #[arg(short, long, default_value_t = 1, value_name = "depth")]
     pub depth: usize,
 
-    /// Find by filename
+    /// Find files by matching filenames
     #[arg(short, long, default_value_t = true, value_name = "filename")]
     pub file_name: bool,
 
-    /// Find by unique id
-    #[arg(short, long, default_value_t = true, value_name = "unique-id")]
-    pub unique_id: bool,
-
-    /// Find by length
+    /// Find files by matching file lengths
     #[arg(short, long, default_value_t = false, value_name = "length")]
     pub length: bool,
+
+    /// Find files by their Pro Tools unique id
+    #[arg(short, long, default_value_t = false, value_name = "unique-id")]
+    pub unique_id: bool,
 }
 
 #[derive(Debug, Args)]

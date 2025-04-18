@@ -143,29 +143,45 @@ pub async fn find_files(
         types.select(ext);
     }
 
-    // FIXME: parse multiple paths and create multiple walkers
-    let path = find_args
-        .search_path
-        .unwrap_or(vec!["../".to_string()])
-        .pop()
-        .expect("at least one file search path");
-
     let (tx, mut rx) = mpsc::channel::<DirEntry>(100);
 
-    println!("Searching: {path}");
-    WalkBuilder::new(path)
-        .max_depth(Some(find_args.depth))
-        .types(types.build()?)
-        .threads(parallelism)
-        .build_parallel()
-        .run(|| {
-            let tx = tx.clone();
-            Box::new(move |result| {
-                let r = result.unwrap();
-                tx.blocking_send(r);
-                WalkState::Continue
-            })
-        });
+    // split up configured parallelism among the walkers,
+    // setting min 1 since passing 0 allows WalkBuilder to
+    // select its own number of threads
+    let walk_par = (parallelism / find_args.search_paths.len()).min(1);
+    let walk_depth = Some(find_args.depth).and_then(|d| if d == 0 { None } else { Some(d) });
+    for path in find_args.search_paths {
+        println!("Searching: {path}");
+        WalkBuilder::new(path)
+            .types(types.build()?)
+            .max_depth(walk_depth)
+            .threads(walk_par)
+            .build_parallel()
+            .run(|| {
+                let tx = tx.clone();
+                let missing_set = missing_set.clone();
+                Box::new(move |result| match result {
+                    Ok(entry) => {
+                        tx.blocking_send(entry);
+                        if missing_set.lock().expect("lock missing set").is_empty() {
+                            WalkState::Quit
+                        } else {
+                            WalkState::Continue
+                        }
+                    }
+                    Err(e) => match e {
+                        e if e.clone().into_io_error().is_some() => {
+                            eprintln!("{e}");
+                            WalkState::Skip
+                        }
+                        e => {
+                            eprintln!("{e}");
+                            WalkState::Continue
+                        }
+                    },
+                })
+            });
+    }
 
     // drop the original tx so the stream closes when the walkers are done
     drop(tx);
@@ -204,8 +220,6 @@ pub async fn find_files(
             println!("❌ {name} could not be found");
         }
     }
-
-    std::process::exit(1);
 
     Ok(found_files)
 }
