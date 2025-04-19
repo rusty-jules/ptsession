@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use bwavfile::WaveReader;
-use ignore::types::{Types, TypesBuilder};
+use ignore::overrides::OverrideBuilder;
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use ptsession::PtSession;
 use tokio::sync::mpsc;
@@ -174,26 +174,7 @@ fn format_name_to_artifact_path((name, path): (String, PathBuf)) -> (String, Pat
     (format!("Audio Files/{name}"), path)
 }
 
-fn create_file_types(extensions: HashSet<String>) -> Result<Types, ignore::Error> {
-    let mut types = TypesBuilder::new();
-
-    // Turn file extensions into ignore glob types
-    let globs = extensions
-        .iter()
-        .map(|ext| format!("{ext}:*.{ext}"))
-        .collect::<Vec<String>>()
-        .join(",");
-    println!("Searching with globs {globs}");
-    types.add_def(&globs)?;
-    for ref ext in extensions {
-        types.select(ext);
-    }
-
-    types.build()
-}
-
 fn start_walkers(
-    types: Types,
     parallelism: usize,
     find_args: &FindArgs,
     missing_set: Arc<Mutex<HashSet<String>>>,
@@ -206,8 +187,13 @@ fn start_walkers(
     let walk_depth = Some(find_args.depth).and_then(|d| if d == 0 { None } else { Some(d) });
     for path in find_args.search_paths.iter() {
         println!("Searching: {path}");
+        // build up the missing file allow list
+        let mut overrides = OverrideBuilder::new(path);
+        for file in missing_set.lock().unwrap().iter() {
+            overrides.add(file).expect("override pattern");
+        }
         WalkBuilder::new(path)
-            .types(types.clone())
+            .overrides(overrides.build().expect("overrides allowlist"))
             .max_depth(walk_depth)
             .threads(walk_par)
             .build_parallel()
@@ -315,18 +301,9 @@ pub async fn find_files(
     // TODO: get missing unique ids
     let missing_unique_ids = HashMap::new();
 
-    // Get all file extensions from the pt session
-    let extensions = missing_files
-        .iter()
-        .filter_map(|file| file.extension().and_then(OsStr::to_str).map(String::from))
-        .collect::<HashSet<String>>();
-
-    // Create the file types to search for
-    let types = create_file_types(extensions)?;
-
     // Kick off the search
     let (tx, rx) = mpsc::channel::<DirEntry>(DIR_ENTRY_CHANNEL_SIZE);
-    start_walkers(types, parallelism, &find_args, missing_set.clone(), tx);
+    start_walkers(parallelism, &find_args, missing_set.clone(), tx);
     let found_files = start_stream(
         &find_args,
         missing_set.clone(),
@@ -345,6 +322,7 @@ pub async fn find_files(
             println!("❌ {name} could not be found");
         }
     }
+    std::process::exit(1);
 
     Ok(found_files)
 }
