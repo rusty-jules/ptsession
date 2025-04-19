@@ -278,7 +278,6 @@ pub async fn find_files(
         return Ok(vec![]);
     }
 
-    // Create a Send + Sync HashSet of the missing file names
     let mut missing_set = missing_files
         .into_iter()
         .map(PathBuf::from)
@@ -313,7 +312,7 @@ pub async fn find_files(
 
     let missing_set = Arc::new(Mutex::new(missing_set));
 
-    // Create a HashMap of file names to file lengths
+    // create a HashMap of file names to file durations
     let missing_lengths = session
         .audio_files
         .iter()
