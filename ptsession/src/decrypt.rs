@@ -1,6 +1,6 @@
 use log::debug;
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 
 // Decrypt a PT Session File
 pub(crate) fn unxor<R: Read>(data: R) -> Result<Vec<u8>, io::Error> {
@@ -50,7 +50,6 @@ pub(crate) fn unxor<R: Read>(data: R) -> Result<Vec<u8>, io::Error> {
     }
 
     debug!("PTF decrypted");
-    std::fs::File::create("./decrypted.ptx")?.write(&ptf_unxored)?;
 
     Ok(ptf_unxored)
 }
