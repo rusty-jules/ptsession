@@ -89,7 +89,9 @@ fn by_file_length(
     }
 }
 
-fn by_file_unique_id() -> impl FnMut(&(String, PathBuf)) -> bool {
+fn by_file_unique_id(
+    missing_unique_ids: HashMap<String, String>,
+) -> impl FnMut(&(String, PathBuf)) -> bool {
     |(name, path): &(String, PathBuf)| -> bool {
         let ext = path.extension().and_then(OsStr::to_str);
 
@@ -255,6 +257,7 @@ async fn start_stream(
     }: &FindArgs,
     missing_set: Arc<Mutex<HashSet<String>>>,
     missing_lengths: HashMap<String, usize>,
+    missing_unique_ids: HashMap<String, String>,
     rx: mpsc::Receiver<DirEntry>,
 ) -> Vec<(String, PathBuf)> {
     let mut files_stream: Pin<Box<dyn Stream<Item = (String, PathBuf)>>> =
@@ -267,7 +270,7 @@ async fn start_stream(
     files_stream = Box::pin(files_stream.filter(by_file_length(missing_lengths, *length)));
 
     if *unique_id {
-        files_stream = Box::pin(files_stream.filter(by_file_unique_id()));
+        files_stream = Box::pin(files_stream.filter(by_file_unique_id(missing_unique_ids)));
     }
 
     files_stream
@@ -309,6 +312,9 @@ pub async fn find_files(
         .map(|wav| (wav.file_name.clone(), wav.len))
         .collect::<HashMap<String, usize>>();
 
+    // TODO: get missing unique ids
+    let missing_unique_ids = HashMap::new();
+
     // Get all file extensions from the pt session
     let extensions = missing_files
         .iter()
@@ -321,7 +327,14 @@ pub async fn find_files(
     // Kick off the search
     let (tx, rx) = mpsc::channel::<DirEntry>(DIR_ENTRY_CHANNEL_SIZE);
     start_walkers(types, parallelism, &find_args, missing_set.clone(), tx);
-    let found_files = start_stream(&find_args, missing_set.clone(), missing_lengths, rx).await;
+    let found_files = start_stream(
+        &find_args,
+        missing_set.clone(),
+        missing_lengths,
+        missing_unique_ids,
+        rx,
+    )
+    .await;
 
     let still_missing = missing_set
         .lock()
