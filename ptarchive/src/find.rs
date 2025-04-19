@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use bwavfile::WaveReader;
 use ignore::types::{Types, TypesBuilder};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use ptsession::PtSession;
@@ -42,25 +43,112 @@ fn by_file_length(
     length: bool,
 ) -> impl FnMut(&(String, PathBuf)) -> bool {
     move |(name, path): &(String, PathBuf)| -> bool {
-        let len = *missing_lengths
-            .get(name)
-            .expect("missing file to have length in ptsession") as u64;
-        let meta_len = std::fs::metadata(path).expect("to get file metadata").len();
-        let len_matches = meta_len == len;
-        if length {
-            len_matches
-        } else {
-            if !length && !len_matches {
-                println!("🚨 Warning: {name} has mismatched file length, but length is being ignored for matching");
+        let ext = path.extension().and_then(OsStr::to_str);
+
+        if ext.is_none() {
+            eprintln!("Unknown file extension for {name}");
+            return false;
+        }
+
+        match ext.unwrap() {
+            "wav" => {
+                // get the frame length of the file to match what pro tools stores
+                let r = WaveReader::open(path);
+                if let Err(e) = r {
+                    eprintln!("Failed to open {}: {e}", path.display());
+                    return false;
+                }
+
+                let fl = r.unwrap().frame_length();
+                if let Err(e) = fl {
+                    eprintln!("Failed to read frame length of {}: {e}", path.display());
+                    return false;
+                }
+
+                let len = *missing_lengths
+                    .get(name)
+                    .expect("missing file to have length in ptsession")
+                    as u64;
+                let len_matches = fl.unwrap() == len;
+
+                if length {
+                    return len_matches;
+                }
+
+                if !length && !len_matches {
+                    println!("🚨 Warning: {name} has mismatched file length, but length is being ignored for matching");
+                }
+
+                return true;
             }
-            true
+            ext => {
+                eprintln!("Cannot match by extension for file type {ext}");
+                return false;
+            }
         }
     }
 }
 
-// TODO: filter by pt unique id
 fn by_file_unique_id() -> impl FnMut(&(String, PathBuf)) -> bool {
-    |(_name, _path): &(String, PathBuf)| -> bool { unimplemented!() }
+    |(name, path): &(String, PathBuf)| -> bool {
+        let ext = path.extension().and_then(OsStr::to_str);
+
+        if ext.is_none() {
+            eprintln!("Unknown file extension for {name}");
+            return false;
+        }
+
+        match ext.unwrap() {
+            "wav" => {
+                let r = WaveReader::open(path);
+                if let Err(e) = r {
+                    eprintln!("❌ Failed to open {}: {e}", path.display());
+                    return false;
+                }
+
+                let bext = r.unwrap().broadcast_extension();
+                if let Err(e) = bext {
+                    eprintln!("❌ Failed to read {} bext: {e}", path.display());
+                    return false;
+                }
+
+                match bext.unwrap() {
+                    None => {
+                        eprintln!("⚠️ {} has no bext, cannot verify unique id", path.display());
+                        return true;
+                    }
+                    Some(bext) => {
+                        if bext.originator != "Pro Tools" {
+                            eprintln!(
+                                "⚠️ {} does not originate from Pro Tools, cannot verify unique id",
+                                path.display()
+                            );
+                            return true;
+                        }
+                        let id = bext.originator_reference;
+                        if id == "" {
+                            eprintln!(
+                                "❌ {} has no originator reference, cannot verify unique id",
+                                path.display()
+                            );
+                            return false;
+                        }
+
+                        // TODO: get originator references from pro tools session
+                        println!("{} originator reference: {}", path.display(), id);
+                        return true;
+                    }
+                }
+            }
+            ext => {
+                eprintln!(
+                    "❌ {} cannot match by extension for file type {ext}",
+                    path.display()
+                );
+                return false;
+            }
+        }
+    }
 }
 
 fn remove_from_missing(
