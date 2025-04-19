@@ -1,41 +1,35 @@
-#![allow(unused)]
-#![allow(unreachable_code)]
-
 use crate::FindArgs;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::{borrow::Cow, collections::HashSet};
 
 use ignore::types::{Types, TypesBuilder};
-use ignore::{DirEntry, Walk, WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 use ptsession::PtSession;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
 
-/// Filter out directories from ignore
-fn filter_files(entry: DirEntry) -> Option<(String, PathBuf)> {
-    if entry.file_type().unwrap().is_file() {
-        let path = entry.into_path();
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap();
-        Some((name, path))
-    } else {
-        None
-    }
+const DIR_ENTRY_CHANNEL_SIZE: usize = 100;
+
+fn to_name_and_path(entry: DirEntry) -> (String, PathBuf) {
+    let path = entry.into_path();
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap();
+    (name, path)
 }
 
 // TODO: ignore filenames (only length & unique id?)
 fn by_file_name(
     missing_set: Arc<Mutex<HashSet<String>>>,
 ) -> impl FnMut(&(String, PathBuf)) -> bool {
-    move |(name, path): &(String, PathBuf)| -> bool {
+    move |(name, _): &(String, PathBuf)| -> bool {
         missing_set
             .lock()
             .expect("get missing set lock")
@@ -66,7 +60,7 @@ fn by_file_length(
 
 // TODO: filter by pt unique id
 fn by_file_unique_id() -> impl FnMut(&(String, PathBuf)) -> bool {
-    |(name, path): &(String, PathBuf)| -> bool { unimplemented!() }
+    |(_name, _path): &(String, PathBuf)| -> bool { unimplemented!() }
 }
 
 fn remove_from_missing(
@@ -132,7 +126,15 @@ fn start_walkers(
                 let missing_set = missing_set.clone();
                 Box::new(move |result| match result {
                     Ok(entry) => {
-                        tx.blocking_send(entry);
+                        // don't send directories to the receiver stream
+                        if let Some(ft) = entry.file_type() {
+                            if ft.is_file() {
+                                if let Err(e) = tx.blocking_send(entry) {
+                                    eprintln!("{e}");
+                                }
+                            }
+                        }
+                        // exit early if we've found all files
                         if missing_set.lock().expect("lock missing set").is_empty() {
                             WalkState::Quit
                         } else {
@@ -140,6 +142,7 @@ fn start_walkers(
                         }
                     }
                     Err(e) => match e {
+                        // don't panic on permission errors, just log them
                         e if e.clone().into_io_error().is_some() => {
                             eprintln!("{e}");
                             WalkState::Skip
@@ -167,7 +170,7 @@ async fn start_stream(
     rx: mpsc::Receiver<DirEntry>,
 ) -> Vec<(String, PathBuf)> {
     let mut files_stream: Pin<Box<dyn Stream<Item = (String, PathBuf)>>> =
-        Box::pin(ReceiverStream::new(rx).filter_map(filter_files));
+        Box::pin(ReceiverStream::new(rx).map(to_name_and_path));
 
     if *file_name {
         files_stream = Box::pin(files_stream.filter(by_file_name(missing_set.clone())));
@@ -228,7 +231,7 @@ pub async fn find_files(
     let types = create_file_types(extensions)?;
 
     // Kick off the search
-    let (tx, mut rx) = mpsc::channel::<DirEntry>(100);
+    let (tx, rx) = mpsc::channel::<DirEntry>(DIR_ENTRY_CHANNEL_SIZE);
     start_walkers(types, parallelism, &find_args, missing_set.clone(), tx);
     let found_files = start_stream(&find_args, missing_set.clone(), missing_lengths, rx).await;
 
