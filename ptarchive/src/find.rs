@@ -90,70 +90,40 @@ fn format_name_to_artifact_path((name, path): (String, PathBuf)) -> (String, Pat
     (format!("Audio Files/{name}"), path)
 }
 
-pub async fn find_files(
-    session: &PtSession,
-    missing_files: Vec<String>,
-    parallelism: usize,
-    find_args: FindArgs,
-) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
-    if find_args.ignore_missing || missing_files.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Create a Send + Sync HashSet of the missing file names
-    let missing_set = Arc::new(Mutex::new(
-        missing_files
-            .iter()
-            .map(PathBuf::from)
-            .filter_map(|p| {
-                // NOTE: we're throwing out any filenames that don't conform to UTF-8,
-                // but since these names come from PtSession which is already `String` it's ok
-                p.file_name().and_then(OsStr::to_str).map(String::from)
-            })
-            .collect::<HashSet<String>>(),
-    ));
-
-    // Create a HashMap of file names to file lengths
-    let missing_lengths = session
-        .audio_files
-        .iter()
-        .map(|wav| (wav.file_name.clone(), wav.len))
-        .collect::<HashMap<String, usize>>();
-
-    // Get all file extensions from the pt session
-    let extensions = missing_files
-        .iter()
-        .filter_map(|file| {
-            PathBuf::from(file)
-                .extension()
-                .and_then(|os_str| Some(os_str.to_string_lossy().to_string()))
-        })
-        .collect::<HashSet<String>>();
+fn create_file_types(extensions: HashSet<String>) -> Result<Types, ignore::Error> {
+    let mut types = TypesBuilder::new();
 
     // Turn file extensions into ignore glob types
     let globs = extensions
         .iter()
         .map(|ext| format!("{ext}:*.{ext}"))
-        .collect::<Vec<String>>();
-
-    let mut types = TypesBuilder::new();
-    println!("Searching with globs {globs:?}");
-    types.add_def(&globs.join(","))?;
+        .collect::<Vec<String>>()
+        .join(",");
+    println!("Searching with globs {globs}");
+    types.add_def(&globs)?;
     for ref ext in extensions {
         types.select(ext);
     }
 
-    let (tx, mut rx) = mpsc::channel::<DirEntry>(100);
+    types.build()
+}
 
+fn start_walkers(
+    types: Types,
+    parallelism: usize,
+    find_args: &FindArgs,
+    missing_set: Arc<Mutex<HashSet<String>>>,
+    tx: mpsc::Sender<DirEntry>,
+) {
     // split up configured parallelism among the walkers,
     // setting min 1 since passing 0 allows WalkBuilder to
     // select its own number of threads
     let walk_par = (parallelism / find_args.search_paths.len()).min(1);
     let walk_depth = Some(find_args.depth).and_then(|d| if d == 0 { None } else { Some(d) });
-    for path in find_args.search_paths {
+    for path in find_args.search_paths.iter() {
         println!("Searching: {path}");
         WalkBuilder::new(path)
-            .types(types.build()?)
+            .types(types.clone())
             .max_depth(walk_depth)
             .threads(walk_par)
             .build_parallel()
@@ -182,39 +152,90 @@ pub async fn find_files(
                 })
             });
     }
+    // NOTE: original tx is dropped here, which is important for the rx stream to close
+}
 
-    // drop the original tx so the stream closes when the walkers are done
-    drop(tx);
-
-    let FindArgs {
+async fn start_stream(
+    FindArgs {
         file_name,
         length,
         unique_id,
         ..
-    } = find_args;
-
+    }: &FindArgs,
+    missing_set: Arc<Mutex<HashSet<String>>>,
+    missing_lengths: HashMap<String, usize>,
+    rx: mpsc::Receiver<DirEntry>,
+) -> Vec<(String, PathBuf)> {
     let mut files_stream: Pin<Box<dyn Stream<Item = (String, PathBuf)>>> =
         Box::pin(ReceiverStream::new(rx).filter_map(filter_files));
 
-    if file_name {
+    if *file_name {
         files_stream = Box::pin(files_stream.filter(by_file_name(missing_set.clone())));
     }
 
-    files_stream = Box::pin(files_stream.filter(by_file_length(missing_lengths, length)));
+    files_stream = Box::pin(files_stream.filter(by_file_length(missing_lengths, *length)));
 
-    if unique_id {
+    if *unique_id {
         files_stream = Box::pin(files_stream.filter(by_file_unique_id()));
     }
 
-    let found_files: Vec<(String, PathBuf)> = files_stream
+    files_stream
         .map(remove_from_missing(missing_set.clone()))
         .map(format_name_to_artifact_path)
-        .collect()
-        .await;
+        .collect::<Vec<(String, PathBuf)>>()
+        .await
+}
+
+pub async fn find_files(
+    session: &PtSession,
+    missing_files: Vec<String>,
+    parallelism: usize,
+    find_args: FindArgs,
+) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
+    if find_args.ignore_missing || missing_files.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let missing_files = missing_files
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<PathBuf>>();
+
+    // Create a Send + Sync HashSet of the missing file names
+    let missing_set = Arc::new(Mutex::new(
+        missing_files
+            .iter()
+            // NOTE: we're throwing out any filenames that don't conform to UTF-8,
+            // but since these names come from PtSession which is already `String` it's ok
+            .filter_map(|p| p.file_name().and_then(OsStr::to_str).map(String::from))
+            .collect::<HashSet<String>>(),
+    ));
+
+    // Create a HashMap of file names to file lengths
+    let missing_lengths = session
+        .audio_files
+        .iter()
+        .map(|wav| (wav.file_name.clone(), wav.len))
+        .collect::<HashMap<String, usize>>();
+
+    // Get all file extensions from the pt session
+    let extensions = missing_files
+        .iter()
+        .filter_map(|file| file.extension().and_then(OsStr::to_str).map(String::from))
+        .collect::<HashSet<String>>();
+
+    // Create the file types to search for
+    let types = create_file_types(extensions)?;
+
+    // Kick off the search
+    let (tx, mut rx) = mpsc::channel::<DirEntry>(100);
+    start_walkers(types, parallelism, &find_args, missing_set.clone(), tx);
+    let found_files = start_stream(&find_args, missing_set.clone(), missing_lengths, rx).await;
 
     let still_missing = missing_set
         .lock()
         .expect("no more contention on missing set");
+
     if !still_missing.is_empty() {
         for name in still_missing.iter() {
             println!("❌ {name} could not be found");
