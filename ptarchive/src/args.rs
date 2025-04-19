@@ -28,7 +28,7 @@ pub struct PushArgs {
     #[arg(value_name = "repository")]
     pub repository: String,
 
-    /// The Pro Tools Session to Read
+    /// The Pro Tools session to read
     #[arg(value_name = "ptx")]
     pub ptx_file: PathBuf,
 
@@ -37,7 +37,7 @@ pub struct PushArgs {
     pub compression: Compression,
 
     /// Compression level to use
-    #[arg(long, default_value_t = 7, value_name = "level")]
+    #[arg(short, long, default_value_t = 7, value_name = "level")]
     pub level: i32,
 
     /// Maximum number of concurrent uploads
@@ -50,8 +50,8 @@ pub struct PushArgs {
 
 #[derive(Debug, Args)]
 pub struct FindArgs {
-    /// Ignore missing session files
-    // TODO: make exclusive with arguments below
+    /// Ignore audio files not found during search on push.
+    /// Use --fail-missing to stop if missing files cannot be found.
     #[arg(short, long, action, value_name = "ignore-missing")]
     pub ignore_missing: bool,
 
@@ -64,17 +64,21 @@ pub struct FindArgs {
     #[arg(short, long, default_value_t = 1, value_name = "depth")]
     pub depth: usize,
 
-    /// Find files by matching filenames
-    #[arg(short, long, default_value_t = true, value_name = "filename")]
-    pub file_name: bool,
+    /// Don't match files by filename. Not recommended.
+    #[arg(long, action)]
+    pub no_filename: bool,
 
-    /// Find files by matching file lengths
-    #[arg(short, long, default_value_t = false, value_name = "length")]
-    pub length: bool,
+    /// Don't match files by file duration. Not recommended.
+    #[arg(long, action)]
+    pub no_duration: bool,
 
-    /// Find files by their Pro Tools unique id
-    #[arg(short, long, default_value_t = false, value_name = "unique-id")]
+    /// Find files by their Pro Tools unique id. Not currently implemented.
+    #[arg(short, long, action)]
     pub unique_id: bool,
+
+    /// Fail if missing files are not found
+    #[arg(short, long, action)]
+    pub fail_missing: bool,
 }
 
 #[derive(Debug, Args)]

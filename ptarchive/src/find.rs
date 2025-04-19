@@ -27,9 +27,7 @@ fn to_name_and_path(entry: DirEntry) -> (String, PathBuf) {
 }
 
 // TODO: ignore filenames (only length & unique id?)
-fn by_file_name(
-    missing_set: Arc<Mutex<HashSet<String>>>,
-) -> impl FnMut(&(String, PathBuf)) -> bool {
+fn by_filename(missing_set: Arc<Mutex<HashSet<String>>>) -> impl FnMut(&(String, PathBuf)) -> bool {
     move |(name, _): &(String, PathBuf)| -> bool {
         missing_set
             .lock()
@@ -38,9 +36,9 @@ fn by_file_name(
     }
 }
 
-fn by_file_length(
+fn by_file_duration(
     missing_lengths: HashMap<String, usize>,
-    length: bool,
+    no_duration: bool,
 ) -> impl FnMut(&(String, PathBuf)) -> bool {
     move |(name, path): &(String, PathBuf)| -> bool {
         let ext = path.extension().and_then(OsStr::to_str);
@@ -71,11 +69,11 @@ fn by_file_length(
                     as u64;
                 let len_matches = fl.unwrap() == len;
 
-                if length {
+                if !no_duration {
                     return len_matches;
                 }
 
-                if !length && !len_matches {
+                if no_duration && !len_matches {
                     println!("🚨 Warning: {name} has mismatched file length, but length is being ignored for matching");
                 }
 
@@ -236,8 +234,8 @@ fn start_walkers(
 
 async fn start_stream(
     FindArgs {
-        file_name,
-        length,
+        no_filename,
+        no_duration,
         unique_id,
         ..
     }: &FindArgs,
@@ -249,11 +247,11 @@ async fn start_stream(
     let mut files_stream: Pin<Box<dyn Stream<Item = (String, PathBuf)>>> =
         Box::pin(ReceiverStream::new(rx).map(to_name_and_path));
 
-    if *file_name {
-        files_stream = Box::pin(files_stream.filter(by_file_name(missing_set.clone())));
+    if !*no_filename {
+        files_stream = Box::pin(files_stream.filter(by_filename(missing_set.clone())));
     }
 
-    files_stream = Box::pin(files_stream.filter(by_file_length(missing_lengths, *length)));
+    files_stream = Box::pin(files_stream.filter(by_file_duration(missing_lengths, *no_duration)));
 
     if *unique_id {
         files_stream = Box::pin(files_stream.filter(by_file_unique_id(missing_unique_ids)));
@@ -321,8 +319,11 @@ pub async fn find_files(
         for name in still_missing.iter() {
             println!("❌ {name} could not be found");
         }
+        if find_args.fail_missing {
+            println!("Failing");
+            std::process::exit(1);
+        }
     }
-    std::process::exit(1);
 
     Ok(found_files)
 }
