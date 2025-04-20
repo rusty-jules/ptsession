@@ -483,7 +483,6 @@ pub async fn push(
         .map(|Wav { file_name, .. }: &Wav| format!("Audio Files/{file_name}"))
         .partition(|file_name| {
             if !std::fs::exists(file_name).unwrap() {
-                println!("❌ {file_name} not in Audio Files folder");
                 false
             } else {
                 true

@@ -183,8 +183,9 @@ fn start_walkers(
     // select its own number of threads
     let walk_par = (parallelism / find_args.search_paths.len()).min(1);
     let walk_depth = Some(find_args.depth).and_then(|d| if d == 0 { None } else { Some(d) });
+    let len = missing_set.lock().unwrap().len();
     for path in find_args.search_paths.iter() {
-        println!("Searching: {path}");
+        println!("Searching for {len} missing audio files in: {path}");
         // build up the missing file allow list
         let mut overrides = OverrideBuilder::new(path);
         for file in missing_set.lock().unwrap().iter() {
@@ -271,23 +272,46 @@ pub async fn find_files(
     find_args: FindArgs,
 ) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
     if find_args.ignore_missing || missing_files.is_empty() {
+        if !missing_files.is_empty() {
+            println!("Ignoring {} missing audio files", missing_files.len());
+        }
         return Ok(vec![]);
     }
 
-    let missing_files = missing_files
+    // Create a Send + Sync HashSet of the missing file names
+    let mut missing_set = missing_files
         .into_iter()
         .map(PathBuf::from)
-        .collect::<Vec<PathBuf>>();
+        // NOTE: we're throwing out any filenames that don't conform to UTF-8,
+        // but since these names come from PtSession which is already `String` it's ok
+        .filter_map(|p| p.file_name().and_then(OsStr::to_str).map(String::from))
+        .collect::<HashSet<String>>();
 
-    // Create a Send + Sync HashSet of the missing file names
-    let missing_set = Arc::new(Mutex::new(
-        missing_files
+    if find_args.regions_only {
+        let region_audio_files = session
+            .audio_regions
             .iter()
-            // NOTE: we're throwing out any filenames that don't conform to UTF-8,
-            // but since these names come from PtSession which is already `String` it's ok
-            .filter_map(|p| p.file_name().and_then(OsStr::to_str).map(String::from))
-            .collect::<HashSet<String>>(),
-    ));
+            .filter_map(|r| r.wav.as_ref())
+            .map(|w| w.file_name.as_str())
+            .collect::<HashSet<&str>>();
+        let len_prev = missing_set.len();
+        missing_set = missing_set
+            .into_iter()
+            .filter(|f| region_audio_files.contains(&f.as_str()))
+            .collect::<HashSet<String>>();
+        if missing_set.len() < len_prev {
+            println!(
+                "Ignoring {} audio files with no regions in the session",
+                len_prev - missing_set.len()
+            )
+        }
+    }
+
+    if missing_set.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let missing_set = Arc::new(Mutex::new(missing_set));
 
     // Create a HashMap of file names to file lengths
     let missing_lengths = session

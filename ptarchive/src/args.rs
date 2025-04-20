@@ -55,6 +55,12 @@ pub struct FindArgs {
     #[arg(short, long, action, value_name = "ignore-missing")]
     pub ignore_missing: bool,
 
+    /// Only find files that have active clips in the session.
+    /// When this is set, files that would otherwise trigger
+    /// --fail-missing will not stop the push.
+    #[arg(short, long, action)]
+    pub regions_only: bool,
+
     /// File paths to search for files in
     #[arg(short, long, default_value = ".", num_args = 1.., value_name = "search-paths")]
     pub search_paths: Vec<String>,
