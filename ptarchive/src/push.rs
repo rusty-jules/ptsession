@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use async_compression::Level;
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use futures_util::{future, Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_client::{
     annotations::{ORG_OPENCONTAINERS_IMAGE_CREATED, ORG_OPENCONTAINERS_IMAGE_TITLE},
@@ -253,6 +253,7 @@ async fn compress_and_upload(
     compression_progress: ProgressBar,
     upload_progress: ProgressBar,
     pushed_digests: BTreeMap<String, OciDescriptor>,
+    dry_run: bool,
 ) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
     // Create a shared http client wrapper for this operation
     let http_client = HttpClient::new(client);
@@ -300,11 +301,20 @@ async fn compress_and_upload(
     });
 
     // Start the upload session
-    let location = begin_push_chunked_session(&http_client, reference).await?;
+    let location = if !dry_run {
+        begin_push_chunked_session(&http_client, reference).await?
+    } else {
+        "".to_string()
+    };
 
     // Set up upload progress bar
     upload_progress.set_message(format!("Uploading {file_name}"));
-    push_stream(&http_client, &location, &reference, chunk_stream).await?;
+
+    if !dry_run {
+        push_stream(&http_client, &location, &reference, chunk_stream).await?;
+    } else {
+        chunk_stream.for_each(|_chunk| future::ready(())).await;
+    }
 
     // Get final compressed digest and size
     let original_digest = format!(
@@ -322,8 +332,11 @@ async fn compress_and_upload(
     upload_progress.set_position(compressed_size as u64);
 
     // Finish the upload
-    let _blob_url =
-        end_push_chunked_session(&http_client, &location, reference, &compressed_digest).await?;
+    if !dry_run {
+        let _blob_url =
+            end_push_chunked_session(&http_client, &location, reference, &compressed_digest)
+                .await?;
+    }
 
     // Mark progress bars as complete
     upload_progress.finish_with_message(format!("Upload complete {file_name}"));
@@ -413,6 +426,7 @@ async fn push_manifest(
     layers: Vec<OciDescriptor>,
     session: PtSession,
     ptx_file: PathBuf,
+    dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     let ptx = File::open(&ptx_file).await?;
     let (mut ptx, ptx_size, ptx_created, ptx_modified) = file_meta(ptx).await?;
@@ -457,11 +471,15 @@ async fn push_manifest(
         }),
     };
 
-    println!("Pushing manifest...");
-    let res: PushResponse = client
-        .push(reference, &[], config, auth, Some(manifest))
-        .await?;
-    println!("Push completed. Manifest URL: {}", res.manifest_url);
+    if !dry_run {
+        println!("Pushing manifest...");
+        let res: PushResponse = client
+            .push(reference, &[], config, auth, Some(manifest))
+            .await?;
+        println!("Push completed. Manifest URL: {}", res.manifest_url);
+    } else {
+        println!("Dry run: not pushing manifest");
+    }
     Ok(())
 }
 
@@ -473,6 +491,7 @@ pub async fn push(
         level,
         parallelism,
         ptx_file,
+        dry_run,
         find_args,
         repository: _,
     }: PushArgs,
@@ -542,6 +561,7 @@ pub async fn push(
                     compression_progress,
                     upload_progress,
                     original_digests,
+                    dry_run,
                 )
                 .await?;
 
@@ -553,7 +573,10 @@ pub async fn push(
         .await?;
 
     println!("Creating manifest for {} layers", layers.len());
-    push_manifest(&client, &reference, &auth, layers, session, ptx_file).await?;
+    push_manifest(
+        &client, &reference, &auth, layers, session, ptx_file, dry_run,
+    )
+    .await?;
 
     Ok(())
 }

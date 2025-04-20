@@ -44,6 +44,10 @@ pub struct PushArgs {
     #[arg(short, long, default_value_t = 5, value_name = "parallelism")]
     pub parallelism: usize,
 
+    /// Discover all files but don't push
+    #[arg(long, action)]
+    pub dry_run: bool,
+
     #[command(flatten)]
     pub find_args: FindArgs,
 }
