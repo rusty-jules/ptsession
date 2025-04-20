@@ -27,6 +27,7 @@ use oci_client::{
 };
 use ptsession::{session::Wav, PtSession};
 use sha2::{Digest as _, Sha256};
+use tempfile::tempfile;
 use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_util::bytes::Bytes;
@@ -266,7 +267,11 @@ async fn compress_and_upload(
     compression_progress.set_length(file_size);
 
     // Create digest reader to calculate original file digest
-    let mut digest_reader = DigestReader::new(file, None);
+    let mut digest_reader = if !dry_run {
+        DigestReader::new(file, None)
+    } else {
+        DigestReader::new(File::from_std(tempfile()?), None)
+    };
     let original_digest_hasher = digest_reader.digest_handle();
 
     // Read the file into memory and compute the digest
