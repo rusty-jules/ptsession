@@ -31,6 +31,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
+use tracing::{debug, info, Instrument};
 
 //const BUF_CAPACITY: usize = 64 * 1024; // 64KB
 
@@ -275,6 +276,7 @@ async fn compress_and_upload(
     if let Some(descriptor) = pushed_digests.get(&format!("sha256:{:x}", original_digest)) {
         compression_progress.finish_with_message(format!("Exists {file_name}"));
         upload_progress.finish_with_message(format!("Exists {file_name}"));
+        info!("file already exists");
         return Ok(descriptor.clone());
     }
 
@@ -309,6 +311,7 @@ async fn compress_and_upload(
 
     // Set up upload progress bar
     upload_progress.set_message(format!("Uploading {file_name}"));
+    info!("uploading file");
 
     if !dry_run {
         push_stream(&http_client, &location, &reference, chunk_stream).await?;
@@ -340,6 +343,7 @@ async fn compress_and_upload(
 
     // Mark progress bars as complete
     upload_progress.finish_with_message(format!("Upload complete {file_name}"));
+    info!("upload complete");
 
     // Output OciDescriptor of the layer
     let mut annotations = maplit::btreemap! {
@@ -472,13 +476,13 @@ async fn push_manifest(
     };
 
     if !dry_run {
-        println!("Pushing manifest...");
+        debug!("pushing manifest...");
         let res: PushResponse = client
             .push(reference, &[], config, auth, Some(manifest))
             .await?;
-        println!("Push completed. Manifest URL: {}", res.manifest_url);
+        info!(url = res.manifest_url, "push complete");
     } else {
-        println!("Dry run: not pushing manifest");
+        info!("dry run: not pushing manifest");
     }
     Ok(())
 }
@@ -493,7 +497,7 @@ pub async fn push(
         ptx_file,
         dry_run,
         find_args,
-        repository: _,
+        ..
     }: PushArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (file_names, missing_files): (Vec<String>, Vec<String>) = session
@@ -531,7 +535,7 @@ pub async fn push(
     let original_digests = fetch_original_digests(&client, &reference, &auth).await?;
 
     // Process all files in parallel with progress reporting
-    println!("Processing audio files with parallelism: {}", parallelism);
+    debug!("processing audio files with parallelism: {}", parallelism);
 
     let layers: Vec<OciDescriptor> = futures_util::stream::iter(all_files)
         .map(|(file_name, file_path)| {
@@ -550,6 +554,17 @@ pub async fn push(
                 upload_progress.set_style(ProgressStyle::clone(&*UPLOAD_STYLE));
                 upload_progress.set_message(format!("Uploading {}", file_name));
 
+                let span = tracing::info_span!(
+                    "upload",
+                    file = file_path.file_name().unwrap().to_str(),
+                    path = file_path.to_str(),
+                    compression.type = compression.to_string(),
+                    compression.level = level,
+                    registry = reference.registry(),
+                    repository = reference.repository(),
+                    tag = reference.tag(),
+                );
+
                 // Process the file
                 let result = compress_and_upload(
                     &client,
@@ -563,6 +578,7 @@ pub async fn push(
                     original_digests,
                     dry_run,
                 )
+                .instrument(span)
                 .await?;
 
                 Ok::<_, Box<dyn std::error::Error + Sync + Send>>(result)
@@ -572,7 +588,7 @@ pub async fn push(
         .try_collect()
         .await?;
 
-    println!("Creating manifest for {} layers", layers.len());
+    debug!("creating manifest for {} layers", layers.len());
     push_manifest(
         &client, &reference, &auth, layers, session, ptx_file, dry_run,
     )

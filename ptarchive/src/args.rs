@@ -10,9 +10,6 @@ pub struct Arguments {
     /// Subcommand
     #[command(subcommand)]
     pub command: Commands,
-
-    #[command(flatten)]
-    global_opts: GlobalOpts,
 }
 
 #[derive(Debug, Args)]
@@ -50,6 +47,9 @@ pub struct PushArgs {
 
     #[command(flatten)]
     pub find_args: FindArgs,
+
+    #[command(flatten)]
+    pub global_opts: GlobalOpts,
 }
 
 #[derive(Debug, Args)]
@@ -108,6 +108,9 @@ pub struct PullArgs {
     /// Maximum number of concurrent downloads
     #[arg(short, long, default_value_t = 5, value_name = "parallelism")]
     pub parallelism: usize,
+
+    #[command(flatten)]
+    pub global_opts: GlobalOpts,
 }
 
 #[derive(Debug, Args)]

@@ -9,12 +9,13 @@ async-compression = { version = "0.4.22", features = ["gzip", "tokio", "xz", "zs
 bwavfile = "2.0.1"
 chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5.34", features = ["derive"] }
-env_logger = { version = "*" }
 futures-util = "0.3.31"
 ignore = "0.4.23"
 indicatif = { version = "0.17.11", features = ["tokio"] }
-log = "0.4"
+json-subscriber = "0.2.4"
 maplit = "1.0.2"
+metrics = "0.24.1"
+metrics-exporter-influx = "0.2.2"
 oci-client = { git = "https://github.com/oras-project/rust-oci-client", rev = "v0.14.0" }
 ptsession = { path = "../ptsession" }
 reqwest = "0.12.15"
@@ -25,6 +26,9 @@ tempfile = "3.19.1"
 tokio = { version = "1.44.1", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.17"
 tokio-util = { version = "0.7.14", features = ["compat", "futures-util", "io", "io-util"] }
+tracing = "0.1.41"
+tracing-indicatif = "0.3.9"
+tracing-subscriber = { version = "0.3.19", features = ["fmt"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.172"

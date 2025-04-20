@@ -14,6 +14,7 @@ use ptsession::PtSession;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
+use tracing::{debug, error, info, warn};
 
 const DIR_ENTRY_CHANNEL_SIZE: usize = 100;
 
@@ -21,7 +22,8 @@ fn to_name_and_path(entry: DirEntry) -> (String, PathBuf) {
     let path = entry.into_path();
     let name = path
         .file_name()
-        .map(|s| s.to_string_lossy().to_string())
+        .and_then(OsStr::to_str)
+        .map(String::from)
         .unwrap();
     (name, path)
 }
@@ -43,8 +45,11 @@ fn by_file_duration(
     move |(name, path): &(String, PathBuf)| -> bool {
         let ext = path.extension().and_then(OsStr::to_str);
 
+        let span = tracing::trace_span!("by_file_duration", file = name, path = path.to_str(), ext);
+        let _guard = span.enter();
+
         if ext.is_none() {
-            eprintln!("Unknown file extension for {name}");
+            warn!("unknown file extension");
             return false;
         }
 
@@ -53,13 +58,13 @@ fn by_file_duration(
                 // get the frame length of the file to match what pro tools stores
                 let r = WaveReader::open(path);
                 if let Err(e) = r {
-                    eprintln!("Failed to open {}: {e}", path.display());
+                    warn!("failed to open: {e}");
                     return false;
                 }
 
                 let fl = r.unwrap().frame_length();
                 if let Err(e) = fl {
-                    eprintln!("Failed to read frame length of {}: {e}", path.display());
+                    warn!("failed to read frame length: {e}",);
                     return false;
                 }
 
@@ -74,13 +79,15 @@ fn by_file_duration(
                 }
 
                 if no_duration && !len_matches {
-                    println!("🚨 Warning: {name} has mismatched file length, but length is being ignored for matching");
+                    warn!(
+                        "wav has mismatched duration, but duration is being ignored for matching"
+                    );
                 }
 
                 return true;
             }
-            ext => {
-                eprintln!("Cannot match by extension for file type {ext}");
+            _ => {
+                error!("cannot match duration by this file type");
                 return false;
             }
         }
@@ -93,8 +100,12 @@ fn by_file_unique_id(
     |(name, path): &(String, PathBuf)| -> bool {
         let ext = path.extension().and_then(OsStr::to_str);
 
+        let span =
+            tracing::trace_span!("by_file_unique_id", file = name, path = path.to_str(), ext);
+        let _guard = span.enter();
+
         if ext.is_none() {
-            eprintln!("Unknown file extension for {name}");
+            warn!("unknown file extension");
             return false;
         }
 
@@ -102,49 +113,40 @@ fn by_file_unique_id(
             "wav" => {
                 let r = WaveReader::open(path);
                 if let Err(e) = r {
-                    eprintln!("❌ Failed to open {}: {e}", path.display());
+                    warn!("failed to open file: {e}");
                     return false;
                 }
 
                 let bext = r.unwrap().broadcast_extension();
                 if let Err(e) = bext {
-                    eprintln!("❌ Failed to read {} bext: {e}", path.display());
+                    warn!("failed to read bext: {e}");
                     return false;
                 }
 
                 match bext.unwrap() {
                     None => {
-                        eprintln!("⚠️ {} has no bext, cannot verify unique id", path.display());
+                        warn!("no bext found, cannot verify unique id");
                         return true;
                     }
                     Some(bext) => {
                         if bext.originator != "Pro Tools" {
-                            eprintln!(
-                                "⚠️ {} does not originate from Pro Tools, cannot verify unique id",
-                                path.display()
-                            );
+                            warn!("wav does not originate from Pro Tools, cannot verify unique id",);
                             return true;
                         }
                         let id = bext.originator_reference;
                         if id == "" {
-                            eprintln!(
-                                "❌ {} has no originator reference, cannot verify unique id",
-                                path.display()
-                            );
+                            warn!("wav has no originator reference, cannot verify unique id",);
                             return false;
                         }
 
                         // TODO: get originator references from pro tools session
-                        println!("{} originator reference: {}", path.display(), id);
+                        info!("originator reference: {id}");
                         return true;
                     }
                 }
             }
-            ext => {
-                eprintln!(
-                    "❌ {} cannot match by extension for file type {ext}",
-                    path.display()
-                );
+            _ => {
+                warn!("cannot match by extension for file type");
                 return false;
             }
         }
@@ -155,14 +157,16 @@ fn remove_from_missing(
     missing_set: Arc<Mutex<HashSet<String>>>,
 ) -> impl FnMut((String, PathBuf)) -> (String, PathBuf) {
     move |(name, path): (String, PathBuf)| -> (String, PathBuf) {
+        let span = tracing::trace_span!("remove from missing", file = name, path = path.to_str());
+        let _guard = span.enter();
         let existed = missing_set
             .lock()
             .expect("get missing files set lock")
             .remove(&name);
         if !existed {
-            println!("Received a file that did not exist in the missing set");
+            debug!("received a file that did not exist in the missing set");
         }
-        println!("✅ Found file: {}", path.display());
+        info!("found file");
         (name, path)
     }
 }
@@ -185,7 +189,9 @@ fn start_walkers(
     let walk_depth = Some(find_args.depth).and_then(|d| if d == 0 { None } else { Some(d) });
     let len = missing_set.lock().unwrap().len();
     for path in find_args.search_paths.iter() {
-        println!("Searching for {len} missing audio files in: {path}");
+        let span = tracing::trace_span!("start_walkers", path);
+        let _guard = span.enter();
+        info!("searching for {len} missing audio files");
         // build up the missing file allow list
         let mut overrides = OverrideBuilder::new(path);
         for file in missing_set.lock().unwrap().iter() {
@@ -205,7 +211,7 @@ fn start_walkers(
                         if let Some(ft) = entry.file_type() {
                             if ft.is_file() {
                                 if let Err(e) = tx.blocking_send(entry) {
-                                    eprintln!("{e}");
+                                    warn!("{e}");
                                 }
                             }
                         }
@@ -219,11 +225,11 @@ fn start_walkers(
                     Err(e) => match e {
                         // don't panic on permission errors, just log them
                         e if e.clone().into_io_error().is_some() => {
-                            eprintln!("{e}");
+                            warn!("{e}");
                             WalkState::Skip
                         }
                         e => {
-                            eprintln!("{e}");
+                            warn!("{e}");
                             WalkState::Continue
                         }
                     },
@@ -273,7 +279,7 @@ pub async fn find_files(
 ) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
     if find_args.ignore_missing || missing_files.is_empty() {
         if !missing_files.is_empty() {
-            println!("Ignoring {} missing audio files", missing_files.len());
+            info!("ignoring {} missing audio files", missing_files.len());
         }
         return Ok(vec![]);
     }
@@ -299,8 +305,8 @@ pub async fn find_files(
             .filter(|f| region_audio_files.contains(&f.as_str()))
             .collect::<HashSet<String>>();
         if missing_set.len() < len_prev {
-            println!(
-                "Ignoring {} audio files with no regions in the session",
+            info!(
+                "ignoring {} audio files with no regions in the session",
                 len_prev - missing_set.len()
             )
         }
@@ -340,10 +346,10 @@ pub async fn find_files(
 
     if !still_missing.is_empty() {
         for name in still_missing.iter() {
-            println!("❌ {name} could not be found");
+            warn!(file = name, "could not be found");
         }
         if find_args.fail_missing {
-            println!("Failing");
+            error!("failing on missing audio files");
             std::process::exit(1);
         }
     }

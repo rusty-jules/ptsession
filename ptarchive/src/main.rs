@@ -12,27 +12,43 @@ mod style;
 
 use crate::args::*;
 use crate::info::*;
+use crate::metrics::VolumeInfo;
 use crate::pull::*;
 use crate::push::*;
+
+use std::str::FromStr;
 
 use clap::Parser;
 use oci_client::Reference;
 use ptsession::PtSession;
-use std::str::FromStr;
+use tracing::Instrument;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    env_logger::init();
-    let cli = Arguments::parse();
-
-    match cli.command {
+    match Arguments::parse().command {
         Commands::Push(args) => {
-            push(
+            metrics::init(&args.global_opts);
+            let VolumeInfo {
+                mount_name,
+                device_serial,
+            } = metrics::get_volume_info(&args.ptx_file)?;
+            let span = tracing::info_span!(
+                "push",
+                hdd.name = mount_name,
+                hdd.serial = device_serial,
+                session = args.ptx_file.to_str()
+            );
+            let json = args.global_opts.json;
+            let cmd = push(
                 Reference::from_str(&args.repository)?,
                 PtSession::from(&args.ptx_file),
                 args,
-            )
-            .await?
+            );
+            if json {
+                cmd.instrument(span).await?
+            } else {
+                cmd.await?
+            }
         }
         Commands::Pull(args) => pull(Reference::from_str(&args.repository)?, args).await?,
         Commands::Info(args) => info(args).await?,
