@@ -5,6 +5,7 @@ mod compression;
 mod find;
 mod info;
 mod meta;
+mod metrics;
 mod pull;
 mod push;
 mod style;
