@@ -17,6 +17,7 @@ use std::task::{Context, Poll};
 use async_compression::Level;
 use futures_util::{future, Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use metrics::{register_counter, register_histogram, Counter};
 use oci_client::{
     annotations::{ORG_OPENCONTAINERS_IMAGE_CREATED, ORG_OPENCONTAINERS_IMAGE_TITLE},
     client::{ClientConfig, Config, PushResponse},
@@ -44,15 +45,17 @@ where
     inner: R,
     hasher: Arc<Mutex<Sha256>>,
     progress: Option<ProgressBar>,
+    metric: Option<Counter>,
     size: Arc<AtomicUsize>,
 }
 
 impl<R: AsyncRead + Unpin> DigestReader<R> {
-    fn new(inner: R, progress: Option<ProgressBar>) -> Self {
+    fn new(inner: R, progress: Option<ProgressBar>, metric: Option<Counter>) -> Self {
         Self {
             inner,
             hasher: Arc::new(Mutex::new(Sha256::new())),
             progress,
+            metric,
             size: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -88,6 +91,9 @@ impl<R: AsyncRead + Unpin> AsyncRead for DigestReader<R> {
                     // Update progress if provided
                     if let Some(progress) = &self.progress {
                         progress.inc(bytes_read as u64);
+                    }
+                    if let Some(counter) = &self.metric {
+                        counter.increment(bytes_read as u64);
                     }
 
                     // Update size counter
@@ -265,12 +271,13 @@ async fn compress_and_upload(
     // Get file meta
     let (file, file_size, file_created, file_modified) = file_meta(file).await?;
     compression_progress.set_length(file_size);
+    let original_counter = register_counter!("source_bytes");
 
     // Create digest reader to calculate original file digest
     let mut digest_reader = if !dry_run {
-        DigestReader::new(file, None)
+        DigestReader::new(file, None, Some(original_counter))
     } else {
-        DigestReader::new(File::from_std(tempfile()?), None)
+        DigestReader::new(File::from_std(tempfile()?), None, Some(original_counter))
     };
     let original_digest_hasher = digest_reader.digest_handle();
 
@@ -291,8 +298,16 @@ async fn compress_and_upload(
         Some(Level::Precise(level)),
     );
 
+    // Register counter only after we've determined if the file will be uploaded
+    let compressed_counter = register_counter!("compressed_bytes");
+    let upload_speed = register_histogram!("upload_speed");
+
     // Create digest reader to calculate compressed file digest
-    let compressed_digest_reader = DigestReader::new(encoder, Some(compression_progress));
+    let compressed_digest_reader = DigestReader::new(
+        encoder,
+        Some(compression_progress),
+        Some(compressed_counter),
+    );
     let compressed_digest_hasher = compressed_digest_reader.digest_handle();
     let compressed_size_tracker = compressed_digest_reader.size_tracker();
 
@@ -301,9 +316,16 @@ async fn compress_and_upload(
     let progress_size_tracker = compressed_size_tracker.clone();
 
     // Create stream
+    let start = std::time::Instant::now();
     let chunk_stream = ReaderStream::new(compressed_digest_reader).and_then(move |bytes| {
-        progress_stream.set_length(progress_size_tracker.load(Ordering::SeqCst) as u64);
+        let size = progress_size_tracker.load(Ordering::SeqCst) as u64;
+        progress_stream.set_length(size);
         progress_stream.inc(bytes.len() as u64);
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let megabytes = size as f64 / 1_000_000.0;
+        upload_speed.record(megabytes / elapsed);
+
         futures_util::future::ok(bytes)
     });
 

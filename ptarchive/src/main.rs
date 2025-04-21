@@ -49,6 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } else {
                 cmd.await?
             }
+
+            // allow metrics to flush
+            std::thread::sleep(std::time::Duration::from_millis(
+                metrics::EXPORT_MILLIS + 100,
+            ));
         }
         Commands::Pull(args) => pull(Reference::from_str(&args.repository)?, args).await?,
         Commands::Info(args) => info(args).await?,

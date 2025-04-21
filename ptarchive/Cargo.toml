@@ -14,8 +14,10 @@ ignore = "0.4.23"
 indicatif = { version = "0.17.11", features = ["tokio"] }
 json-subscriber = "0.2.4"
 maplit = "1.0.2"
-metrics = "0.24.1"
+metrics = "0.21.1"
 metrics-exporter-influx = "0.2.2"
+metrics-tracing-context = "0.14.0"
+metrics-util = "0.15.1"
 oci-client = { git = "https://github.com/oras-project/rust-oci-client", rev = "v0.14.0" }
 ptsession = { path = "../ptsession" }
 reqwest = "0.12.15"
