@@ -4,6 +4,7 @@ use crate::client::HttpClient;
 use crate::compression::Compression;
 use crate::find::find_files;
 use crate::meta::file_meta;
+use crate::metrics::{BYTES_READ, BYTES_SENT, UPLOAD_SPEED};
 use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 
 use std::collections::BTreeMap;
@@ -33,7 +34,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, info, Instrument};
+use tracing::{debug, info, warn, Instrument};
 
 //const BUF_CAPACITY: usize = 64 * 1024; // 64KB
 
@@ -271,7 +272,7 @@ async fn compress_and_upload(
     // Get file meta
     let (file, file_size, file_created, file_modified) = file_meta(file).await?;
     compression_progress.set_length(file_size);
-    let original_counter = register_counter!("source_bytes");
+    let original_counter = register_counter!(BYTES_READ);
 
     // Create digest reader to calculate original file digest
     let mut digest_reader = if !dry_run {
@@ -299,8 +300,8 @@ async fn compress_and_upload(
     );
 
     // Register counter only after we've determined if the file will be uploaded
-    let compressed_counter = register_counter!("compressed_bytes");
-    let upload_speed = register_histogram!("upload_speed");
+    let compressed_counter = register_counter!(BYTES_SENT);
+    let upload_speed = register_histogram!(UPLOAD_SPEED);
 
     // Create digest reader to calculate compressed file digest
     let compressed_digest_reader = DigestReader::new(
@@ -482,6 +483,7 @@ async fn push_manifest(
         media_type: "application/vnd.avid.ptx".to_string(),
         annotations: Some(annotations),
     };
+    register_counter!(BYTES_READ, "file" => ptx_filename.clone()).absolute(ptx_size);
 
     let manifest = OciImageManifest {
         schema_version: 2,
@@ -496,7 +498,7 @@ async fn push_manifest(
         },
         layers,
         annotations: Some(maplit::btreemap! {
-            ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename,
+            ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename.clone(),
             ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => chrono::Local::now()
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }),
@@ -507,6 +509,34 @@ async fn push_manifest(
         let res: PushResponse = client
             .push(reference, &[], config, auth, Some(manifest))
             .await?;
+
+        // FIXME: update this if we start compressing ptx files
+        register_counter!(BYTES_SENT, "file" => ptx_filename).absolute(ptx_size);
+
+        // get the size of the manifest
+        let manifest_head = reqwest::Client::new()
+            .request(reqwest::Method::HEAD, &res.manifest_url)
+            .send()
+            .await;
+
+        match manifest_head {
+            Ok(manifest_res) => match manifest_res.headers().get("Content-Length") {
+                Some(length)
+                    if length
+                        .to_str()
+                        .ok()
+                        .and_then(|l| l.parse::<u64>().ok())
+                        .is_some() =>
+                {
+                    let len = length.to_str()?.parse::<u64>()?;
+                    register_counter!(BYTES_READ, "file" => res.manifest_url.clone()).absolute(len);
+                    register_counter!(BYTES_SENT, "file" => res.manifest_url.clone()).absolute(len);
+                }
+                _ => warn!("manifest head request did not include Content-Length"),
+            },
+            Err(e) => warn!("failed to get manifest size: {e}"),
+        }
+
         info!(url = res.manifest_url, "push complete");
     } else {
         info!("dry run: not pushing manifest");

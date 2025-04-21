@@ -57,7 +57,7 @@ pub fn init(opts: &GlobalOpts) {
             .build()
             .unwrap();
 
-        let allow = Allowlist::new(["hdd.name", "session", "file"]);
+        let allow = Allowlist::new(["hdd.name", "session", "file", "repository", "tag"]);
         let recorder = TracingContextLayer::new(allow).layer(recorder);
 
         metrics::set_boxed_recorder(Box::new(recorder)).unwrap();
