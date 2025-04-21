@@ -16,7 +16,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 pub const EXPORT_MILLIS: u64 = 500;
 
 pub fn init(opts: &GlobalOpts) {
-    let filter = Targets::new().with_target("ptarchive", Level::DEBUG);
+    let filter = Targets::new()
+        .with_target("ptarchive", Level::DEBUG)
+        .with_target("metrics_exporter_influx", Level::DEBUG);
     let json = opts.json.then(|| {
         json_subscriber::fmt::layer()
             .with_target(false)
@@ -52,8 +54,16 @@ pub fn init(opts: &GlobalOpts) {
         let (recorder, exporter) = metrics_exporter_influx::InfluxBuilder::new()
             .with_duration(std::time::Duration::from_millis(EXPORT_MILLIS))
             .add_global_tag("service", "ptarchive")
-            // TODO: allow configuration of metrics and log file location
-            .with_writer(std::fs::File::create("ptarchive.metrics").unwrap())
+            // TODO: allow configuration of metrics, target db, and log file location
+            //.with_writer(std::fs::File::create("ptarchive.metrics").unwrap())
+            .with_influx_api(
+                "http://100.103.172.27:30889g/api/v2/write",
+                "ptarchive-test".to_string(),
+                None,
+                None,
+                Some("metrics".to_string()),
+            )
+            .expect("connect to influxdb")
             .build()
             .unwrap();
 

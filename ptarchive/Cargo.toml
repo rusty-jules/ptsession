@@ -15,7 +15,7 @@ indicatif = { version = "0.17.11", features = ["tokio"] }
 json-subscriber = "0.2.4"
 maplit = "1.0.2"
 metrics = "0.21.1"
-metrics-exporter-influx = "0.2.2"
+metrics-exporter-influx = { version = "0.2.2", features = ["http"] }
 metrics-tracing-context = "0.14.0"
 metrics-util = "0.15.1"
 oci-client = { git = "https://github.com/oras-project/rust-oci-client", rev = "v0.14.0" }

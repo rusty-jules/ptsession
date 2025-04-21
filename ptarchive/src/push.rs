@@ -483,7 +483,12 @@ async fn push_manifest(
         media_type: "application/vnd.avid.ptx".to_string(),
         annotations: Some(annotations),
     };
-    register_counter!(BYTES_READ, "file" => ptx_filename.clone()).absolute(ptx_size);
+    let mut metrics_labels = [
+        ("file", ptx_filename.clone()),
+        ("repository", reference.repository().to_string()),
+        ("tag", reference.tag().unwrap().to_string()),
+    ];
+    register_counter!(BYTES_READ, &metrics_labels).absolute(ptx_size);
 
     let manifest = OciImageManifest {
         schema_version: 2,
@@ -498,7 +503,7 @@ async fn push_manifest(
         },
         layers,
         annotations: Some(maplit::btreemap! {
-            ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename.clone(),
+            ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => ptx_filename,
             ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => chrono::Local::now()
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }),
@@ -511,30 +516,41 @@ async fn push_manifest(
             .await?;
 
         // FIXME: update this if we start compressing ptx files
-        register_counter!(BYTES_SENT, "file" => ptx_filename).absolute(ptx_size);
+        register_counter!(BYTES_SENT, &metrics_labels).absolute(ptx_size);
 
-        // get the size of the manifest
+        // get the size and digest of the manifest
         let manifest_head = reqwest::Client::new()
             .request(reqwest::Method::HEAD, &res.manifest_url)
             .send()
             .await;
 
         match manifest_head {
-            Ok(manifest_res) => match manifest_res.headers().get("Content-Length") {
-                Some(length)
-                    if length
-                        .to_str()
-                        .ok()
-                        .and_then(|l| l.parse::<u64>().ok())
-                        .is_some() =>
-                {
-                    let len = length.to_str()?.parse::<u64>()?;
-                    register_counter!(BYTES_READ, "file" => res.manifest_url.clone()).absolute(len);
-                    register_counter!(BYTES_SENT, "file" => res.manifest_url.clone()).absolute(len);
+            Ok(manifest_res) => {
+                let headers = manifest_res.headers();
+                let length = headers
+                    .get("Content-Length")
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let digest = headers
+                    .get("Docker-Content-Digest")
+                    .and_then(|h| h.to_str().ok());
+                match (length, digest) {
+                    (Some(len), Some(digest)) => {
+                        for (tag, val) in metrics_labels.iter_mut() {
+                            if *tag == "file" {
+                                *val = format!("{}@{digest}", reference.repository())
+                            }
+                        }
+                        register_counter!(BYTES_READ, &metrics_labels).absolute(len);
+                        register_counter!(BYTES_SENT, &metrics_labels).absolute(len);
+                    }
+                    (None, _) => warn!("manifest head request did not include Content-Length"),
+                    (_, None) => {
+                        warn!("manifest head request did not include Docker-Content-Digest")
+                    }
                 }
-                _ => warn!("manifest head request did not include Content-Length"),
-            },
-            Err(e) => warn!("failed to get manifest size: {e}"),
+            }
+            Err(e) => warn!("failed to head manifest: {e}"),
         }
 
         info!(url = res.manifest_url, "push complete");
