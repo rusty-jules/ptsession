@@ -553,7 +553,7 @@ async fn push_manifest(
             Err(e) => warn!("failed to head manifest: {e}"),
         }
 
-        info!(url = res.manifest_url, "push complete");
+        info!(file = res.manifest_url, "push complete");
     } else {
         info!("dry run: not pushing manifest");
     }
