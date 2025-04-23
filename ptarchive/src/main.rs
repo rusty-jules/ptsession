@@ -55,8 +55,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 metrics::EXPORT_MILLIS + 100,
             ));
         }
-        Commands::Pull(args) => pull(Reference::from_str(&args.repository)?, args).await?,
-        Commands::Info(args) => info(args).await?,
+        Commands::Pull(args) => {
+            metrics::init(&args.global_opts);
+            pull(Reference::from_str(&args.repository)?, args).await?;
+        }
+        Commands::Info(args) => {
+            metrics::init(&args.global_opts);
+            info(args).await?;
+        }
     }
 
     Ok(())
