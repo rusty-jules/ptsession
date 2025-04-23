@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 static DEFAULT_CONFIG: &str = "~/.ptarchive/config.toml";
 static DEFAULT_LOGS: &str = "~/.ptarchive/logs";
+static DEFAULT_CACHE: &str = "~/.ptarchive/cache.db";
 static DEFAULT_COMPRESSION_LEVEL: i32 = 7;
 static DEFAULT_PARALLELISM: usize = 5;
 
@@ -23,6 +24,9 @@ pub struct Arguments {
 
     #[clap(flatten)]
     pub logs: Option<Logs>,
+
+    #[clap(flatten)]
+    pub cache: Option<Cache>,
 
     /// Subcommand
     #[command(subcommand)]
@@ -159,6 +163,21 @@ impl fmt::Display for MetricsFlavor {
     }
 }
 
+#[derive(Clone, Debug, Args, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Cache {
+    #[arg(long = "cache-path", default_value = DEFAULT_CACHE, hide = true)]
+    pub path: String,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Cache {
+            path: DEFAULT_CACHE.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Args, Default, Serialize, Deserialize)]
 pub struct MetricsOptions {
     #[arg(long = "metrics-flavor", default_value_t = MetricsFlavor::None, hide = true)]
@@ -220,6 +239,13 @@ pub struct PushArgs {
     #[command(flatten)]
     #[serde(skip)]
     pub global_opts: GlobalOpts,
+
+    /// Do not cache pushed file digests in sqlite database
+    //#[arg(short, long, default_value = DEFAULT_CACHE)]
+    //pub cache: String,
+
+    #[arg(long, action)]
+    pub no_cache: bool,
 }
 
 impl PushArgs {

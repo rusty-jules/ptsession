@@ -1,5 +1,5 @@
-use crate::annotations::*;
 use crate::args::{CompressionOpts, PushArgs};
+use crate::cache::{self, DigestRecord};
 use crate::client::HttpClient;
 use crate::compression::Compression;
 use crate::find::find_files;
@@ -9,6 +9,7 @@ use crate::metrics::{
     TOTAL_BYTES_WRITTEN, UPLOAD_SPEED,
 };
 use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
+use crate::{annotations::*, HDD, SESSION};
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -31,6 +32,7 @@ use oci_client::{
     Reference,
 };
 use ptsession::{session::Wav, PtSession};
+use r2d2_sqlite::SqliteConnectionManager;
 use sha2::{Digest as _, Sha256};
 use tempfile::tempfile;
 use tokio::fs::File;
@@ -129,7 +131,7 @@ async fn begin_push_chunked_session(
     // Create POST request to start upload session
     let url = format!(
         "{}://{}/v2/{}/blobs/uploads/",
-        "http", // Assuming HTTP
+        "http", // FIXME: Assuming HTTP
         image.resolve_registry(),
         image.repository()
     );
@@ -256,6 +258,7 @@ async fn end_push_chunked_session(
 }
 
 async fn compress_and_upload(
+    pool: r2d2::Pool<SqliteConnectionManager>,
     client: &oci_client::Client,
     reference: &Reference,
     file_name: String,
@@ -274,10 +277,52 @@ async fn compress_and_upload(
 
     // Get file meta
     let (file, file_size, file_created, file_modified) = file_meta(file).await?;
-    compression_progress.set_length(file_size);
     let original_counter = register_counter!(BYTES_READ);
 
+    // Check if the file already exists
+    let conn = pool.get()?;
+    if let Some(digest) = cache::get_digest_by_name_and_session(&conn, &file_name)? {
+        let url = format!(
+            "{}://{}/v2/{}/blobs/{}",
+            "http", // FIXME: Assuming HTTP
+            reference.resolve_registry(),
+            reference.repository(),
+            digest
+        );
+        let blob_res = reqwest::Client::new()
+            .request(reqwest::Method::HEAD, url)
+            .send()
+            .await?;
+        let exists = blob_res.status().is_success();
+        if exists {
+            //compression_progress.finish_with_message(format!("Exists {file_name}"));
+            upload_progress.finish_with_message(format!("Exists {file_name}"));
+            info!("file already exists");
+            // FIXME: race condition here?
+            let (_, descriptor) = pushed_digests
+                .iter()
+                .find(|(_, descriptor)| descriptor.digest == digest)
+                .expect("descriptor exists in pushed digests");
+            return Ok(descriptor.clone());
+        }
+    }
+
+    compression_progress.set_length(file_size);
+
     // Create digest reader to calculate original file digest
+    let mut digest_record = DigestRecord {
+        // TODO: add compression level and type
+        filename: file_name.clone(),
+        absolute_path: file_path.canonicalize()?.to_string_lossy().to_string(),
+        length: file_size,
+        unique_id: None,
+        session: SESSION.get().unwrap().to_string(),
+        hdd: HDD.get().unwrap().to_string(),
+        registry: reference.registry().to_string(),
+        repository: reference.repository().to_string(),
+        tag: reference.tag().unwrap().to_string(),
+        ..Default::default()
+    };
     let mut digest_reader = if !dry_run {
         DigestReader::new(file, None, Some(original_counter))
     } else {
@@ -293,6 +338,8 @@ async fn compress_and_upload(
         compression_progress.finish_with_message(format!("Exists {file_name}"));
         upload_progress.finish_with_message(format!("Exists {file_name}"));
         info!("file already exists");
+        digest_record.digest = descriptor.digest.clone();
+        cache::insert_record(&conn, &digest_record)?;
         return Ok(descriptor.clone());
     }
 
@@ -359,6 +406,10 @@ async fn compress_and_upload(
         compressed_digest_hasher.lock().unwrap().clone().finalize()
     );
     let compressed_size = compressed_size_tracker.load(Ordering::SeqCst);
+
+    // Save to cache
+    digest_record.digest = compressed_digest.clone();
+    cache::insert_record(&conn, &digest_record)?;
 
     // Set final upload progress bar length and position
     upload_progress.set_length(compressed_size as u64);
@@ -568,6 +619,7 @@ async fn push_manifest(
 pub async fn push(
     reference: Reference,
     session: PtSession,
+    pool: r2d2::Pool<SqliteConnectionManager>,
     PushArgs {
         compression:
             CompressionOpts {
@@ -599,9 +651,15 @@ pub async fn push(
         .into_iter()
         .map(|file_name| (file_name.clone(), PathBuf::from(file_name)))
         .chain(
-            find_files(&session, missing_files, *parallelism, find_args)
-                .await?
-                .into_iter(),
+            find_files(
+                &session,
+                missing_files,
+                *parallelism,
+                find_args,
+                pool.clone(),
+            )
+            .await?
+            .into_iter(),
         )
         .collect();
 
@@ -626,6 +684,7 @@ pub async fn push(
 
     let layers: Vec<OciDescriptor> = futures_util::stream::iter(all_files)
         .map(|(file_name, file_path)| {
+            let pool = pool.clone();
             let client = client.clone();
             let reference = reference.clone();
             let multi_progress = multi_progress.clone();
@@ -649,6 +708,7 @@ pub async fn push(
 
                 // Process the file
                 compress_and_upload(
+                    pool,
                     &client,
                     &reference,
                     file_name,

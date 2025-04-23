@@ -1,5 +1,6 @@
 mod annotations;
 mod args;
+mod cache;
 mod client;
 mod compression;
 mod find;
@@ -23,7 +24,11 @@ use figment::providers::{Format, Serialized, Toml};
 use figment::Figment;
 use oci_client::Reference;
 use ptsession::PtSession;
+use tokio::sync::OnceCell;
 use tracing::{error, info_span, Instrument};
+
+pub static SESSION: OnceCell<String> = OnceCell::const_new();
+pub static HDD: OnceCell<String> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -46,12 +51,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 &args.global_opts,
             );
             let session = args.ptx_file.to_str();
+            SESSION.set(session.unwrap().to_string())?;
             let reference =
                 Reference::from_str(&args.repository).inspect_err(|e| error!(session, "{e}"))?;
             let VolumeInfo {
                 mount_name,
                 device_serial,
             } = metrics::get_volume_info(&args.ptx_file).inspect_err(|e| error!(session, "{e}"))?;
+            HDD.set(mount_name.clone())?;
             let span = info_span!(
                 "push",
                 hdd.name = mount_name,
@@ -64,9 +71,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tag = reference.tag(),
                 path = args.ptx_file.canonicalize()?.to_str(),
             );
+            let pool = cache::init_pool(&config)?;
+            //let pool = if args.no_cache {
+            //None
+            //} else {
+            //Some(cache::init_pool(&config)?)
+            //};
             match args.global_opts.json {
                 true => {
-                    push(reference, PtSession::from(&args.ptx_file), args)
+                    push(reference, PtSession::from(&args.ptx_file), pool, args)
                         .instrument(span)
                         .await?;
                     if config.metrics.is_some() {
@@ -76,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         ));
                     }
                 }
-                false => push(reference, PtSession::from(&args.ptx_file), args).await?,
+                false => push(reference, PtSession::from(&args.ptx_file), pool, args).await?,
             }
         }
         Commands::Pull(args) => {

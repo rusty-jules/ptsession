@@ -11,6 +11,7 @@ use bwavfile::WaveReader;
 use ignore::overrides::OverrideBuilder;
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use ptsession::PtSession;
+use r2d2_sqlite::SqliteConnectionManager;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
@@ -291,7 +292,10 @@ pub async fn find_files(
     missing_files: Vec<String>,
     parallelism: usize,
     find_args: &FindArgs,
+    pool: r2d2::Pool<SqliteConnectionManager>,
 ) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
+    // TODO: look up missing_file paths by session and filename in cache
+
     if find_args.ignore_missing || missing_files.is_empty() {
         if !missing_files.is_empty() {
             info!("ignoring {} missing audio files", missing_files.len());
