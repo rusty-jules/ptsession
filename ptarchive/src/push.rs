@@ -582,6 +582,8 @@ pub async fn push(
         ..
     }: &PushArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("ptarchive push start");
+
     let (file_names, missing_files): (Vec<String>, Vec<String>) = session
         .audio_files
         .iter()

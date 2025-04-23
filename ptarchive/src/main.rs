@@ -62,7 +62,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tag = reference.tag(),
                 path = args.ptx_file.canonicalize()?.to_str(),
             );
-            info!("ptarchive push start");
             match args.global_opts.json {
                 true => {
                     push(reference, PtSession::from(&args.ptx_file), args)
