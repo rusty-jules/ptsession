@@ -1,4 +1,4 @@
-use crate::args::InfoArgs;
+use crate::{args::InfoArgs, InfoPrintArgs};
 
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ use oci_client::{
 use ptsession::PtSession;
 use tokio::fs::File;
 
-fn print_text(ptsession: PtSession) {
+fn print_text(ptsession: &PtSession) {
     println!("Version: {}", ptsession.version);
     println!("Sample Rate: {}", ptsession.session_sample_rate);
     println!("Audio Files: {}", ptsession.audio_files.len());
@@ -37,19 +37,13 @@ fn print_ptx(
     ptsession: PtSession,
     args: &InfoArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if args.print.text {
-        print_text(ptsession);
-    } else if args.print.json {
-        let json = if args.pretty {
-            serde_json::to_string_pretty(&ptsession)?
-        } else {
-            serde_json::to_string(&ptsession)?
-        };
-        println!("{json}");
-    } else if args.print.table {
-        println!("not supported");
-    } else {
-        print_text(ptsession);
+    match args.format {
+        InfoPrintArgs::Text => print_text(&ptsession),
+        InfoPrintArgs::Table => unimplemented!(),
+        InfoPrintArgs::Json if args.pretty => {
+            println!("{}", serde_json::to_string_pretty(&ptsession)?)
+        }
+        InfoPrintArgs::Json => println!("{}", serde_json::to_string(&ptsession)?),
     }
     Ok(())
 }

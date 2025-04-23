@@ -3,6 +3,7 @@ use crate::compression::Compression;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -15,7 +16,7 @@ pub struct Arguments {
 #[derive(Debug, Args)]
 pub struct GlobalOpts {
     /// Whether to output json
-    #[arg(short, long, action, value_name = "json")]
+    #[arg(short, long, action)]
     pub json: bool,
 }
 
@@ -123,24 +124,34 @@ pub struct InfoArgs {
     #[arg(short, long, default_value_t = false)]
     pub pretty: bool,
 
+    #[arg(short, long, default_value_t = InfoPrintArgs::Text, value_name = "format")]
+    pub format: InfoPrintArgs,
+
     #[command(flatten)]
-    pub print: InfoPrintArgs,
+    pub global_opts: GlobalOpts,
 }
 
-#[derive(Debug, Args)]
-#[group(multiple = false)]
-pub struct InfoPrintArgs {
+#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InfoPrintArgs {
     /// Output text
-    #[arg(long, action)]
-    pub text: bool,
-
+    #[default]
+    Text,
     /// Output table
-    #[arg(short, long, action)]
-    pub table: bool,
-
+    Table,
     /// Output json
-    #[arg(short, long, action)]
-    pub json: bool,
+    Json,
+}
+
+impl ToString for InfoPrintArgs {
+    fn to_string(&self) -> String {
+        match self {
+            InfoPrintArgs::Text => "text",
+            InfoPrintArgs::Table => "table",
+            InfoPrintArgs::Json => "json",
+        }
+        .to_string()
+    }
 }
 
 #[derive(Subcommand)]
