@@ -46,6 +46,7 @@ fn get_mount_and_device(path: &Path) -> io::Result<(String, String)> {
     // safety: those are guaranteed null‑terminated C strings
     let mnt = unsafe { CStr::from_ptr(st.f_mntonname.as_ptr()) }
         .to_str()
+        .map(|s| s.trim_start_matches("/Volumes/"))
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "invalid statsf utf‑8"))?
         .to_owned();
     let dev = unsafe { CStr::from_ptr(st.f_mntfromname.as_ptr()) }
