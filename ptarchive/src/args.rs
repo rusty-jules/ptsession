@@ -210,6 +210,7 @@ pub struct CompressionOpts {
 }
 
 #[derive(Debug, Args, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct PushArgs {
     /// OCI repository to push to
     #[arg(value_name = "repository")]
