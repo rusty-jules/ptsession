@@ -260,7 +260,7 @@ impl PtSessionParser {
             self.parse_audio_tracks(&audio_files).map_err(PtError::Io)?;
 
         debug!("Parsing markers...");
-        let markers = self.parse_markers().map_err(PtError::Io)?;
+        //let _markers = self.parse_markers().map_err(PtError::Io);
 
         let session = PtSession {
             version: self.version.unwrap(),
@@ -268,7 +268,7 @@ impl PtSessionParser {
             audio_files,
             audio_tracks,
             audio_regions,
-            markers,
+            markers: vec![],
             ..Default::default()
         };
 
@@ -555,7 +555,6 @@ impl PtSessionParser {
     }
 
     fn parse_markers(&mut self) -> Result<Vec<Marker>, io::Error> {
-        //return Ok(Vec::new());
         let block_map = self.block_map.take();
         let marker_blocks = &block_map.as_ref().unwrap().marker_blocks;
         let mut markers = vec![];
