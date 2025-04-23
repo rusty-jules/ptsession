@@ -140,8 +140,8 @@ pub async fn pull(
     // add config as a layer to pull
     let mut layers = manifest.layers;
     layers.push(manifest.config);
-    let _: Vec<()> = stream::iter(layers)
-        .map(|layer| {
+    stream::iter(layers)
+        .for_each_concurrent(parallelism, |layer| {
             // clone inputs
             let client = client.clone();
             let reference = reference.clone();
@@ -176,28 +176,31 @@ pub async fn pull(
                         "Unknown compression type for {file_name}: {}",
                         err.to_string()
                     ));
-                    return Err(err);
+                    return;
                 }
 
                 download_progress.set_style(ProgressStyle::clone(&*DOWNLOAD_STYLE));
                 download_progress.set_length(size);
 
-                pull_and_decompress(
+                let res = pull_and_decompress(
                     &client,
                     &reference,
                     &layer,
                     &file_name,
                     target_dir,
-                    download_progress,
+                    download_progress.clone(),
                     compression.unwrap(),
                     unpack,
                 )
-                .await
+                .await;
+
+                if let Err(err) = res {
+                    download_progress.set_style(ProgressStyle::clone(&*FAILED_STYLE));
+                    download_progress.finish_with_message(format!("{err}"));
+                }
             }
         })
-        .buffer_unordered(parallelism)
-        .try_collect()
-        .await?;
+        .await;
 
     Ok(())
 }
