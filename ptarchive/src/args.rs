@@ -29,6 +29,64 @@ pub struct Arguments {
     pub command: Commands,
 }
 
+impl Arguments {
+    // merge options from the config file with individual command arguments
+    // FIXME: figure out a better way to do this...
+    // this problem is that we want both `--json` as a cli argument and
+    // log.format = "json" in the config file
+    pub fn merge(&mut self) {
+        let json = self
+            .logs
+            .as_ref()
+            .map(|l| l.format.is_json())
+            .unwrap_or(false);
+        match &mut self.command {
+            Commands::Push(args) => {
+                if !json && args.global_opts.json {
+                    if let Some(ref mut logs) = self.logs {
+                        logs.format = InfoPrintArgs::Json;
+                    } else {
+                        self.logs = Some(Logs {
+                            format: InfoPrintArgs::Json,
+                            file: None,
+                        })
+                    }
+                } else {
+                    args.global_opts.json = json;
+                }
+            }
+            Commands::Pull(args) => {
+                if !json && args.global_opts.json {
+                    if let Some(ref mut logs) = self.logs {
+                        logs.format = InfoPrintArgs::Json;
+                    } else {
+                        self.logs = Some(Logs {
+                            format: InfoPrintArgs::Json,
+                            file: None,
+                        })
+                    }
+                } else {
+                    args.global_opts.json = json;
+                }
+            }
+            Commands::Info(args) => {
+                if !json && args.global_opts.json {
+                    if let Some(ref mut logs) = self.logs {
+                        logs.format = InfoPrintArgs::Json;
+                    } else {
+                        self.logs = Some(Logs {
+                            format: InfoPrintArgs::Json,
+                            file: None,
+                        })
+                    }
+                } else {
+                    args.global_opts.json = json;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default, Args, Serialize, Deserialize)]
 pub struct GlobalOpts {
     /// Whether to output json

@@ -30,11 +30,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Arguments::parse();
     let cfg_path = cli.config.to_string_lossy().to_string();
 
-    let config = Figment::new()
+    let mut config = Figment::new()
         .merge(Serialized::defaults(cli))
         .merge(Toml::file(shellexpand::tilde(&cfg_path).as_ref()))
         .extract::<Arguments>()
         .inspect_err(|e| eprintln!("config: {e}"))?;
+
+    config.merge();
 
     match &config.command {
         Commands::Push(args) => {
