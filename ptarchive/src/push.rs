@@ -4,7 +4,10 @@ use crate::client::HttpClient;
 use crate::compression::Compression;
 use crate::find::find_files;
 use crate::meta::file_meta;
-use crate::metrics::{BYTES_READ, BYTES_SENT, UPLOAD_SPEED};
+use crate::metrics::{
+    BYTES_READ, BYTES_WRITTEN, FILES_PROCESSED, FILE_FAILURES, TOTAL_BYTES_READ,
+    TOTAL_BYTES_WRITTEN, UPLOAD_SPEED,
+};
 use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 
 use std::collections::BTreeMap;
@@ -18,7 +21,7 @@ use std::task::{Context, Poll};
 use async_compression::Level;
 use futures_util::{future, Stream, StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use metrics::{register_counter, register_histogram, Counter};
+use metrics::{counter, register_counter, register_histogram, Counter};
 use oci_client::{
     annotations::{ORG_OPENCONTAINERS_IMAGE_CREATED, ORG_OPENCONTAINERS_IMAGE_TITLE},
     client::{ClientConfig, Config, PushResponse},
@@ -300,7 +303,7 @@ async fn compress_and_upload(
     );
 
     // Register counter only after we've determined if the file will be uploaded
-    let compressed_counter = register_counter!(BYTES_SENT);
+    let compressed_counter = register_counter!(BYTES_WRITTEN);
     let upload_speed = register_histogram!(UPLOAD_SPEED);
 
     // Create digest reader to calculate compressed file digest
@@ -489,6 +492,7 @@ async fn push_manifest(
         ("tag", reference.tag().unwrap().to_string()),
     ];
     register_counter!(BYTES_READ, &metrics_labels).absolute(ptx_size);
+    counter!(TOTAL_BYTES_READ, ptx_size);
 
     let manifest = OciImageManifest {
         schema_version: 2,
@@ -516,7 +520,8 @@ async fn push_manifest(
             .await?;
 
         // FIXME: update this if we start compressing ptx files
-        register_counter!(BYTES_SENT, &metrics_labels).absolute(ptx_size);
+        register_counter!(BYTES_WRITTEN, &metrics_labels).absolute(ptx_size);
+        counter!(TOTAL_BYTES_WRITTEN, ptx_size);
 
         // get the size and digest of the manifest
         let manifest_head = reqwest::Client::new()
@@ -541,8 +546,8 @@ async fn push_manifest(
                                 *val = format!("{}@{digest}", reference.repository())
                             }
                         }
-                        register_counter!(BYTES_READ, &metrics_labels).absolute(len);
-                        register_counter!(BYTES_SENT, &metrics_labels).absolute(len);
+                        register_counter!(BYTES_WRITTEN, &metrics_labels).absolute(len);
+                        counter!(TOTAL_BYTES_WRITTEN, len);
                     }
                     (None, _) => warn!("manifest head request did not include Content-Length"),
                     (_, None) => {
@@ -609,6 +614,10 @@ pub async fn push(
 
     // Process all files in parallel with progress reporting
     debug!("processing audio files with parallelism: {}", parallelism);
+    let total_bytes_read = register_counter!(TOTAL_BYTES_READ);
+    let total_bytes_written = register_counter!(TOTAL_BYTES_WRITTEN);
+    let files_processed = register_counter!(FILES_PROCESSED);
+    let file_errors = register_counter!(FILE_FAILURES);
 
     let layers: Vec<OciDescriptor> = futures_util::stream::iter(all_files)
         .map(|(file_name, file_path)| {
@@ -639,7 +648,7 @@ pub async fn push(
                 );
 
                 // Process the file
-                let result = compress_and_upload(
+                compress_and_upload(
                     &client,
                     &reference,
                     file_name,
@@ -652,12 +661,23 @@ pub async fn push(
                     dry_run,
                 )
                 .instrument(span)
-                .await?;
-
-                Ok::<_, Box<dyn std::error::Error + Sync + Send>>(result)
+                .await
             }
         })
         .buffer_unordered(parallelism)
+        .inspect_ok(|layer| {
+            files_processed.increment(1);
+            total_bytes_read.increment(
+                layer
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get(IO_PTSESSION_ORIGINAL_SIZE))
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .expect("original size annotation"),
+            );
+            total_bytes_written.increment(layer.size as u64);
+        })
+        .inspect_err(|_| file_errors.increment(1))
         .try_collect()
         .await?;
 

@@ -182,7 +182,7 @@ pub async fn pull(
                 download_progress.set_style(ProgressStyle::clone(&*DOWNLOAD_STYLE));
                 download_progress.set_length(size);
 
-                let result = pull_and_decompress(
+                pull_and_decompress(
                     &client,
                     &reference,
                     &layer,
@@ -192,9 +192,7 @@ pub async fn pull(
                     compression.unwrap(),
                     unpack,
                 )
-                .await?;
-
-                Ok::<_, Box<dyn std::error::Error + Sync + Send>>(result)
+                .await
             }
         })
         .buffer_unordered(parallelism)
