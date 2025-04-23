@@ -55,7 +55,7 @@ pub fn init(
     let filter = Targets::new()
         .with_target("ptarchive", Level::TRACE)
         //.with_target("ptsession", Level::TRACE)
-        .with_target("metrics_exporter_influx", Level::DEBUG);
+        .with_target("metrics_exporter_influx", Level::WARN);
     let json_sub = json.then(|| {
         json_subscriber::fmt::layer()
             .with_target(false)

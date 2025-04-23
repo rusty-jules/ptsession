@@ -23,7 +23,7 @@ use figment::providers::{Format, Serialized, Toml};
 use figment::Figment;
 use oci_client::Reference;
 use ptsession::PtSession;
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info_span, Instrument};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
