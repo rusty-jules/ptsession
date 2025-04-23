@@ -57,7 +57,7 @@ pub fn init(opts: &GlobalOpts) {
             // TODO: allow configuration of metrics, target db, and log file location
             //.with_writer(std::fs::File::create("ptarchive.metrics").unwrap())
             .with_influx_api(
-                "http://100.103.172.27:30889g/api/v2/write",
+                "http://100.103.172.27:30889/api/v2/write",
                 "ptarchive-test".to_string(),
                 None,
                 None,
