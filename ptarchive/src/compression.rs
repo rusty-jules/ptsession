@@ -1,17 +1,18 @@
 use crate::annotations::MediaType;
 
 use std::convert::TryFrom;
+use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 
 use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
 use async_compression::tokio::bufread::{GzipEncoder, XzEncoder, ZstdEncoder};
 use async_compression::Level;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncRead};
 
-#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Compression {
     /// Compress files to `.xz` format
     XZ,
@@ -75,15 +76,15 @@ impl Compression {
     }
 }
 
-impl ToString for Compression {
-    fn to_string(&self) -> String {
-        match self {
+impl fmt::Display for Compression {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
             Compression::XZ => "xz",
             Compression::ZSTD => "zstd",
             Compression::GZIP => "gzip",
             Compression::None => "none",
-        }
-        .to_string()
+        };
+        write!(f, "{s}")
     }
 }
 

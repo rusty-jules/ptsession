@@ -1,5 +1,5 @@
 use crate::annotations::*;
-use crate::args::PushArgs;
+use crate::args::{CompressionOpts, PushArgs};
 use crate::client::HttpClient;
 use crate::compression::Compression;
 use crate::find::find_files;
@@ -570,8 +570,11 @@ pub async fn push(
     reference: Reference,
     session: PtSession,
     PushArgs {
-        compression,
-        level,
+        compression:
+            CompressionOpts {
+                compressor: compression,
+                level,
+            },
         parallelism,
         ptx_file,
         dry_run,

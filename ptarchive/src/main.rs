@@ -19,13 +19,24 @@ use crate::push::*;
 use std::str::FromStr;
 
 use clap::Parser;
+use figment::providers::{Format, Serialized, Toml};
+use figment::Figment;
 use oci_client::Reference;
 use ptsession::PtSession;
 use tracing::{error, info, info_span, Instrument};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match Arguments::parse().command {
+    let cli = Arguments::parse();
+    let cfg_path = cli.config.to_string_lossy().to_string();
+
+    let config = Figment::new()
+        .merge(Serialized::defaults(cli))
+        .merge(Toml::file(shellexpand::tilde(&cfg_path).as_ref()))
+        .extract::<Arguments>()
+        .inspect_err(|e| eprintln!("config: {e}"))?;
+
+    match config.command {
         Commands::Push(args) => {
             metrics::init(&args.global_opts);
             let session = args.ptx_file.to_str();
@@ -40,8 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 hdd.name = mount_name,
                 hdd.serial = device_serial,
                 session,
-                compression.type = args.compression.to_string(),
-                compression.level = args.level,
+                compression.type = %args.compression.compressor,
+                compression.level = args.compression.level,
                 registry = reference.registry(),
                 repository = reference.repository(),
                 tag = reference.tag(),

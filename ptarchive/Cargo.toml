@@ -9,6 +9,7 @@ async-compression = { version = "0.4.22", features = ["gzip", "tokio", "xz", "zs
 bwavfile = "2.0.1"
 chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5.34", features = ["derive"] }
+figment = { version = "0.10.19", features = ["toml"] }
 futures-util = "0.3.31"
 ignore = "0.4.23"
 indicatif = { version = "0.17.11", features = ["tokio"] }
@@ -24,6 +25,7 @@ reqwest = "0.12.15"
 serde = { version = "*", default-features = false, features = ["derive"] }
 serde_json = { version = "*" }
 sha2 = "0.10.8"
+shellexpand = "3.1.1"
 tempfile = "3.19.1"
 tokio = { version = "1.44.1", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.17"

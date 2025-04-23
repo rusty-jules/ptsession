@@ -3,24 +3,115 @@ use crate::compression::Compression;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
+static DEFAULT_CONFIG: &str = "~/.ptarchive/config.toml";
+static DEFAULT_LOGS: &str = "~/.ptarchive/logs";
+static DEFAULT_COMPRESSION_LEVEL: i32 = 7;
+static DEFAULT_PARALLELISM: usize = 5;
+
+#[derive(Parser, Default, Debug, Serialize, Deserialize)]
+#[command(version, about = "Archive Pro Tools session as ORAS artifacts.", long_about = None)]
 pub struct Arguments {
+    /// Config file location
+    #[arg(short, long, default_value = DEFAULT_CONFIG)]
+    pub config: PathBuf,
+
+    #[clap(flatten)]
+    pub metrics: Option<MetricsOptions>,
+
+    #[clap(flatten)]
+    pub logs: Option<Logs>,
+
     /// Subcommand
     #[command(subcommand)]
     pub command: Commands,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args, Serialize, Deserialize)]
 pub struct GlobalOpts {
     /// Whether to output json
     #[arg(short, long, action)]
     pub json: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Serialize, Deserialize, Default)]
+pub struct Logs {
+    #[arg(long = "logs-format", hide(true))]
+    pub format: Option<InfoPrintArgs>,
+
+    #[clap(flatten)]
+    pub file: Option<LogFile>,
+}
+
+impl Logs {
+    fn default_directory() -> PathBuf {
+        PathBuf::from(shellexpand::tilde(DEFAULT_LOGS).as_ref())
+    }
+}
+
+#[derive(Debug, Args, Serialize, Deserialize, Default)]
+pub struct LogFile {
+    #[clap(flatten)]
+    pub filename: LogFilename,
+
+    #[arg(long = "logs-file-directory", default_value = DEFAULT_LOGS, hide(true))]
+    #[serde(default = "Logs::default_directory")]
+    pub directory: PathBuf,
+}
+
+#[derive(Debug, Args, Serialize, Deserialize, Default)]
+pub struct LogFilename {
+    #[arg(long = "logs-filename-method", hide(true))]
+    pub method: Option<LogFilenameMethod>,
+}
+
+#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFilenameMethod {
+    #[default]
+    Hash,
+}
+
+#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricsFlavor {
+    #[default]
+    Influxdb,
+}
+
+#[derive(Clone, Debug, Args, Default, Serialize, Deserialize)]
+pub struct MetricsOptions {
+    #[arg(long = "metrics-flavor", hide = true)]
+    pub flavor: Option<MetricsFlavor>,
+
+    #[arg(long = "metrics-endpoint", hide = true)]
+    pub endpoint: Option<String>,
+
+    #[arg(long = "metrics-database", hide = true)]
+    pub database: Option<String>,
+
+    #[arg(long = "metrics-table", hide = true)]
+    pub table: Option<String>,
+
+    #[arg(long = "metrics-token", hide = true)]
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Args, Default, Serialize, Deserialize)]
+pub struct CompressionOpts {
+    /// Compression algorithm for uploaded files
+    #[arg(short, long, default_value_t = Compression::ZSTD, value_name = "compression")]
+    #[serde(default)]
+    pub compressor: Compression,
+
+    /// Compression level to use
+    #[arg(short, long, default_value_t = DEFAULT_COMPRESSION_LEVEL, value_name = "level")]
+    #[serde(default = "PushArgs::default_compression_level")]
+    pub level: i32,
+}
+
+#[derive(Debug, Args, Default, Serialize, Deserialize)]
 pub struct PushArgs {
     /// OCI repository to push to
     #[arg(value_name = "repository")]
@@ -30,30 +121,39 @@ pub struct PushArgs {
     #[arg(value_name = "ptx")]
     pub ptx_file: PathBuf,
 
-    /// Compression algorithm for uploaded files
-    #[arg(short, long, default_value_t = Compression::ZSTD, value_name = "compression")]
-    pub compression: Compression,
-
-    /// Compression level to use
-    #[arg(short, long, default_value_t = 7, value_name = "level")]
-    pub level: i32,
+    #[command(flatten)]
+    pub compression: CompressionOpts,
 
     /// Maximum number of concurrent uploads
-    #[arg(short, long, default_value_t = 5, value_name = "parallelism")]
+    #[arg(short, long, default_value_t = DEFAULT_PARALLELISM, value_name = "parallelism")]
+    #[serde(default = "PushArgs::default_parallelism")]
     pub parallelism: usize,
 
     /// Discover all files but don't push
     #[arg(long, action)]
+    #[serde(skip)]
     pub dry_run: bool,
 
     #[command(flatten)]
+    #[serde(flatten)]
     pub find_args: FindArgs,
 
     #[command(flatten)]
+    #[serde(skip)]
     pub global_opts: GlobalOpts,
 }
 
-#[derive(Debug, Args)]
+impl PushArgs {
+    fn default_compression_level() -> i32 {
+        DEFAULT_COMPRESSION_LEVEL
+    }
+    fn default_parallelism() -> usize {
+        DEFAULT_PARALLELISM
+    }
+}
+
+#[derive(Debug, Args, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct FindArgs {
     /// Ignore audio files not found during search on push.
     /// Use --fail-missing to stop if missing files cannot be found.
@@ -92,7 +192,7 @@ pub struct FindArgs {
     pub fail_missing: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Serialize, Deserialize)]
 pub struct PullArgs {
     /// OCI repository to pull from
     #[arg(value_name = "repository")]
@@ -107,14 +207,14 @@ pub struct PullArgs {
     pub target_dir: Option<PathBuf>,
 
     /// Maximum number of concurrent downloads
-    #[arg(short, long, default_value_t = 5, value_name = "parallelism")]
+    #[arg(short, long, default_value_t = DEFAULT_PARALLELISM, value_name = "parallelism")]
     pub parallelism: usize,
 
     #[command(flatten)]
     pub global_opts: GlobalOpts,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Default, Serialize, Deserialize)]
 pub struct InfoArgs {
     /// File path or OCI artifact reference (image url) to pro tools session
     #[arg(value_name = "ptx file or oci reference")]
@@ -131,8 +231,8 @@ pub struct InfoArgs {
     pub global_opts: GlobalOpts,
 }
 
-#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InfoPrintArgs {
     /// Output text
     #[default]
@@ -154,8 +254,9 @@ impl ToString for InfoPrintArgs {
     }
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug, Serialize, Deserialize)]
 #[command(version, about, long_about = None)]
+#[serde(rename_all = "lowercase")]
 pub enum Commands {
     /// Push a pro tools session and its audio files to an oci repository as an oras artifact
     Push(PushArgs),
@@ -163,4 +264,10 @@ pub enum Commands {
     Pull(PullArgs),
     /// Print info of a local or remote pro tools session
     Info(InfoArgs),
+}
+
+impl Default for Commands {
+    fn default() -> Self {
+        Commands::Info(InfoArgs::default())
+    }
 }
