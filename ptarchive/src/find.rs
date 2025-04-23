@@ -201,7 +201,9 @@ fn start_walkers(
         let _guard = span.enter();
         info!(
             file = files,
-            path, "searching for {len} missing audio files"
+            path,
+            "searching for {len} missing audio files with depth {}",
+            walk_depth.unwrap_or(0)
         );
         // build up the missing file allow list
         let mut overrides = OverrideBuilder::new(path);
@@ -269,6 +271,8 @@ async fn start_stream(
         files_stream = Box::pin(files_stream.filter(by_filename(missing_set.clone())));
     }
 
+    // TODO: add an `extract_meta` .map() to generalize metadata across types and avoid
+    // double opening files for duration and unique id
     files_stream = Box::pin(files_stream.filter(by_file_duration(missing_lengths, *no_duration)));
 
     if *unique_id {
