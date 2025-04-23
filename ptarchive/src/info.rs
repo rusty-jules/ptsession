@@ -82,11 +82,11 @@ pub async fn fetch_ptx(
     Ok(session)
 }
 
-pub async fn info(args: InfoArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ptx_session = if let Ok(reference) = args.file.parse::<Reference>() {
+pub async fn info(args: &InfoArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ptx_session = if let Ok(reference) = args.ptx_file.parse::<Reference>() {
         fetch_ptx(&reference, &args).await?
     } else {
-        PtSession::from(PathBuf::from(&args.file))
+        PtSession::from(PathBuf::from(&args.ptx_file))
     };
 
     print_ptx(ptx_session, &args)

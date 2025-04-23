@@ -121,7 +121,7 @@ fn validate_manifest(
 
 pub async fn pull(
     reference: Reference,
-    args: PullArgs,
+    args: &PullArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let auth = RegistryAuth::Anonymous;
     let client = Client::new(ClientConfig {

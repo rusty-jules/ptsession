@@ -286,7 +286,7 @@ pub async fn find_files(
     session: &PtSession,
     missing_files: Vec<String>,
     parallelism: usize,
-    find_args: FindArgs,
+    find_args: &FindArgs,
 ) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
     if find_args.ignore_missing || missing_files.is_empty() {
         if !missing_files.is_empty() {

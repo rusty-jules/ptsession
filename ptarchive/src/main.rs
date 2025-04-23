@@ -36,9 +36,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .extract::<Arguments>()
         .inspect_err(|e| eprintln!("config: {e}"))?;
 
-    match config.command {
+    match &config.command {
         Commands::Push(args) => {
-            metrics::init(&args.global_opts);
+            metrics::init(
+                &config,
+                Some(args.ptx_file.to_string_lossy().to_string()),
+                &args.global_opts,
+            );
             let session = args.ptx_file.to_str();
             let reference =
                 Reference::from_str(&args.repository).inspect_err(|e| error!(session, "{e}"))?;
@@ -64,20 +68,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     push(reference, PtSession::from(&args.ptx_file), args)
                         .instrument(span)
                         .await?;
-                    // allow metrics to flush
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        metrics::EXPORT_MILLIS + 100,
-                    ));
+                    if config.metrics.is_some() {
+                        // allow metrics to flush
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            metrics::EXPORT_MILLIS + 100,
+                        ));
+                    }
                 }
                 false => push(reference, PtSession::from(&args.ptx_file), args).await?,
             }
         }
         Commands::Pull(args) => {
-            metrics::init(&args.global_opts);
+            metrics::init(&config, None, &args.global_opts);
             pull(Reference::from_str(&args.repository)?, args).await?;
         }
         Commands::Info(args) => {
-            metrics::init(&args.global_opts);
+            metrics::init(&config, Some(args.ptx_file.clone()), &args.global_opts);
             info(args).await?;
         }
     }

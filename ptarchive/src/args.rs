@@ -1,5 +1,6 @@
 use crate::compression::Compression;
 
+use std::fmt;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -35,35 +36,35 @@ pub struct GlobalOpts {
     pub json: bool,
 }
 
-#[derive(Debug, Args, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Args, Serialize, Deserialize, Default)]
 pub struct Logs {
-    #[arg(long = "logs-format", hide(true))]
-    pub format: Option<InfoPrintArgs>,
+    #[arg(long = "logs-format", default_value_t = InfoPrintArgs::Text, hide(true))]
+    pub format: InfoPrintArgs,
 
     #[clap(flatten)]
     pub file: Option<LogFile>,
 }
 
 impl Logs {
-    fn default_directory() -> PathBuf {
-        PathBuf::from(shellexpand::tilde(DEFAULT_LOGS).as_ref())
+    fn default_directory() -> String {
+        shellexpand::tilde(DEFAULT_LOGS).to_string()
     }
 }
 
-#[derive(Debug, Args, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Args, Serialize, Deserialize, Default)]
 pub struct LogFile {
     #[clap(flatten)]
     pub filename: LogFilename,
 
     #[arg(long = "logs-file-directory", default_value = DEFAULT_LOGS, hide(true))]
     #[serde(default = "Logs::default_directory")]
-    pub directory: PathBuf,
+    pub directory: String,
 }
 
-#[derive(Debug, Args, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Args, Serialize, Deserialize, Default)]
 pub struct LogFilename {
-    #[arg(long = "logs-filename-method", hide(true))]
-    pub method: Option<LogFilenameMethod>,
+    #[arg(long = "logs-filename-method", default_value_t = LogFilenameMethod::Hash, hide(true))]
+    pub method: LogFilenameMethod,
 }
 
 #[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize, Deserialize)]
@@ -73,17 +74,37 @@ pub enum LogFilenameMethod {
     Hash,
 }
 
+impl fmt::Display for LogFilenameMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
+            Self::Hash => "hash",
+        };
+        write!(f, "{s}")
+    }
+}
+
 #[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MetricsFlavor {
-    #[default]
     Influxdb,
+    #[default]
+    None,
+}
+
+impl fmt::Display for MetricsFlavor {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
+            Self::Influxdb => "influxdb",
+            Self::None => "none",
+        };
+        write!(f, "{s}")
+    }
 }
 
 #[derive(Clone, Debug, Args, Default, Serialize, Deserialize)]
 pub struct MetricsOptions {
-    #[arg(long = "metrics-flavor", hide = true)]
-    pub flavor: Option<MetricsFlavor>,
+    #[arg(long = "metrics-flavor", default_value_t = MetricsFlavor::None, hide = true)]
+    pub flavor: MetricsFlavor,
 
     #[arg(long = "metrics-endpoint", hide = true)]
     pub endpoint: Option<String>,
@@ -218,7 +239,7 @@ pub struct PullArgs {
 pub struct InfoArgs {
     /// File path or OCI artifact reference (image url) to pro tools session
     #[arg(value_name = "ptx file or oci reference")]
-    pub file: String,
+    pub ptx_file: String,
 
     /// Pretty print json
     #[arg(short, long, default_value_t = false)]
@@ -231,7 +252,7 @@ pub struct InfoArgs {
     pub global_opts: GlobalOpts,
 }
 
-#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, clap::ValueEnum, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InfoPrintArgs {
     /// Output text
@@ -243,14 +264,20 @@ pub enum InfoPrintArgs {
     Json,
 }
 
-impl ToString for InfoPrintArgs {
-    fn to_string(&self) -> String {
-        match self {
+impl InfoPrintArgs {
+    pub fn is_json(&self) -> bool {
+        *self == InfoPrintArgs::Json
+    }
+}
+
+impl fmt::Display for InfoPrintArgs {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
             InfoPrintArgs::Text => "text",
             InfoPrintArgs::Table => "table",
             InfoPrintArgs::Json => "json",
-        }
-        .to_string()
+        };
+        write!(f, "{s}")
     }
 }
 

@@ -461,7 +461,7 @@ async fn push_manifest(
     auth: &RegistryAuth,
     layers: Vec<OciDescriptor>,
     session: PtSession,
-    ptx_file: PathBuf,
+    ptx_file: &Path,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     let ptx = File::open(&ptx_file).await?;
@@ -580,7 +580,7 @@ pub async fn push(
         dry_run,
         find_args,
         ..
-    }: PushArgs,
+    }: &PushArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (file_names, missing_files): (Vec<String>, Vec<String>) = session
         .audio_files
@@ -598,7 +598,7 @@ pub async fn push(
         .into_iter()
         .map(|file_name| (file_name.clone(), PathBuf::from(file_name)))
         .chain(
-            find_files(&session, missing_files, parallelism, find_args)
+            find_files(&session, missing_files, *parallelism, find_args)
                 .await?
                 .into_iter(),
         )
@@ -652,18 +652,18 @@ pub async fn push(
                     &reference,
                     file_name,
                     &file_path,
-                    compression,
-                    level,
+                    *compression,
+                    *level,
                     compression_progress,
                     upload_progress,
                     original_digests,
-                    dry_run,
+                    *dry_run,
                 )
                 .instrument(span)
                 .await
             }
         })
-        .buffer_unordered(parallelism)
+        .buffer_unordered(*parallelism)
         .inspect_ok(|layer| {
             files_processed.increment(1);
             total_bytes_read.increment(
@@ -682,7 +682,7 @@ pub async fn push(
 
     debug!("creating manifest for {} layers", layers.len());
     push_manifest(
-        &client, &reference, &auth, layers, session, ptx_file, dry_run,
+        &client, &reference, &auth, layers, session, ptx_file, *dry_run,
     )
     .await?;
 
