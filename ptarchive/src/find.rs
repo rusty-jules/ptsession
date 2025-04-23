@@ -96,7 +96,7 @@ fn by_file_duration(
 }
 
 fn by_file_unique_id(
-    missing_unique_ids: HashMap<String, String>,
+    _missing_unique_ids: HashMap<String, String>,
 ) -> impl FnMut(&(String, PathBuf)) -> bool {
     |(name, path): &(String, PathBuf)| -> bool {
         let ext = path.extension().and_then(OsStr::to_str);
