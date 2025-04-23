@@ -14,7 +14,7 @@ use ptsession::PtSession;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 const DIR_ENTRY_CHANNEL_SIZE: usize = 100;
 
@@ -45,11 +45,11 @@ fn by_file_duration(
     move |(name, path): &(String, PathBuf)| -> bool {
         let ext = path.extension().and_then(OsStr::to_str);
 
-        let span = tracing::trace_span!("by_file_duration", file = name, path = path.to_str(), ext);
+        let span = tracing::info_span!("by_file_duration", file = name, path = path.to_str(), ext);
         let _guard = span.enter();
 
         if ext.is_none() {
-            warn!("unknown file extension");
+            warn!(file = name, "unknown file extension");
             return false;
         }
 
@@ -58,13 +58,13 @@ fn by_file_duration(
                 // get the frame length of the file to match what pro tools stores
                 let r = WaveReader::open(path);
                 if let Err(e) = r {
-                    warn!("failed to open: {e}");
+                    warn!(file = name, "failed to open: {e}");
                     return false;
                 }
 
                 let fl = r.unwrap().frame_length();
                 if let Err(e) = fl {
-                    warn!("failed to read frame length: {e}",);
+                    warn!(file = name, "failed to read frame length: {e}",);
                     return false;
                 }
 
@@ -80,6 +80,7 @@ fn by_file_duration(
 
                 if no_duration && !len_matches {
                     warn!(
+                        file = name,
                         "wav has mismatched duration, but duration is being ignored for matching"
                     );
                 }
@@ -87,7 +88,7 @@ fn by_file_duration(
                 return true;
             }
             _ => {
-                error!("cannot match duration by this file type");
+                error!(file = name, "cannot match duration by this file type");
                 return false;
             }
         }
@@ -101,7 +102,7 @@ fn by_file_unique_id(
         let ext = path.extension().and_then(OsStr::to_str);
 
         let span =
-            tracing::trace_span!("by_file_unique_id", file = name, path = path.to_str(), ext);
+            tracing::debug_span!("by_file_unique_id", file = name, path = path.to_str(), ext);
         let _guard = span.enter();
 
         if ext.is_none() {
@@ -140,7 +141,7 @@ fn by_file_unique_id(
                         }
 
                         // TODO: get originator references from pro tools session
-                        info!("originator reference: {id}");
+                        debug!("originator reference: {id}");
                         return true;
                     }
                 }
@@ -164,9 +165,9 @@ fn remove_from_missing(
             .expect("get missing files set lock")
             .remove(&name);
         if !existed {
-            debug!("received a file that did not exist in the missing set");
+            trace!("received a file that did not exist in the missing set");
         }
-        info!("found file");
+        trace!("found file");
         (name, path)
     }
 }
@@ -188,10 +189,20 @@ fn start_walkers(
     let walk_par = (parallelism / find_args.search_paths.len()).min(1);
     let walk_depth = Some(find_args.depth).and_then(|d| if d == 0 { None } else { Some(d) });
     let len = missing_set.lock().unwrap().len();
+    let files = missing_set
+        .lock()
+        .unwrap()
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<&str>>()
+        .join(", ");
     for path in find_args.search_paths.iter() {
         let span = tracing::trace_span!("start_walkers", path);
         let _guard = span.enter();
-        info!("searching for {len} missing audio files");
+        info!(
+            file = files,
+            path, "searching for {len} missing audio files"
+        );
         // build up the missing file allow list
         let mut overrides = OverrideBuilder::new(path);
         for file in missing_set.lock().unwrap().iter() {

@@ -17,7 +17,8 @@ pub const EXPORT_MILLIS: u64 = 500;
 
 pub fn init(opts: &GlobalOpts) {
     let filter = Targets::new()
-        .with_target("ptarchive", Level::DEBUG)
+        .with_target("ptarchive", Level::TRACE)
+        //.with_target("ptsession", Level::TRACE)
         .with_target("metrics_exporter_influx", Level::DEBUG);
     let json = opts.json.then(|| {
         json_subscriber::fmt::layer()
