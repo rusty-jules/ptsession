@@ -327,8 +327,7 @@ async fn compress_and_upload(
         progress_stream.inc(bytes.len() as u64);
 
         let elapsed = start.elapsed().as_secs_f64();
-        let megabytes = size as f64 / 1_000_000.0;
-        upload_speed.record(megabytes / elapsed);
+        upload_speed.record(size as f64 / elapsed);
 
         futures_util::future::ok(bytes)
     });
