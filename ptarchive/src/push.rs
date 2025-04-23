@@ -37,7 +37,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 //const BUF_CAPACITY: usize = 64 * 1024; // 64KB
 
@@ -415,6 +415,7 @@ async fn fetch_original_digests(
     if let Err(OciDistributionError::RegistryError { .. }) = tags {
         return Ok(BTreeMap::new());
     } else if let Err(e) = tags {
+        error!("{e}");
         return Err(e.into());
     }
 
@@ -640,11 +641,6 @@ pub async fn push(
                     "upload",
                     file = file_path.file_name().unwrap().to_str(),
                     path = file_path.to_str(),
-                    compression.type = compression.to_string(),
-                    compression.level = level,
-                    registry = reference.registry(),
-                    repository = reference.repository(),
-                    tag = reference.tag(),
                 );
 
                 // Process the file

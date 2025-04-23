@@ -21,39 +21,45 @@ use std::str::FromStr;
 use clap::Parser;
 use oci_client::Reference;
 use ptsession::PtSession;
-use tracing::Instrument;
+use tracing::{error, info, info_span, Instrument};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match Arguments::parse().command {
         Commands::Push(args) => {
             metrics::init(&args.global_opts);
+            let session = args.ptx_file.to_str();
+            let reference =
+                Reference::from_str(&args.repository).inspect_err(|e| error!(session, "{e}"))?;
             let VolumeInfo {
                 mount_name,
                 device_serial,
-            } = metrics::get_volume_info(&args.ptx_file)?;
-            let span = tracing::info_span!(
+            } = metrics::get_volume_info(&args.ptx_file).inspect_err(|e| error!(session, "{e}"))?;
+            let span = info_span!(
                 "push",
                 hdd.name = mount_name,
                 hdd.serial = device_serial,
-                session = args.ptx_file.to_str()
+                session,
+                compression.type = args.compression.to_string(),
+                compression.level = args.level,
+                registry = reference.registry(),
+                repository = reference.repository(),
+                tag = reference.tag(),
+                path = args.ptx_file.canonicalize()?.to_str(),
             );
-            let json = args.global_opts.json;
-            let cmd = push(
-                Reference::from_str(&args.repository)?,
-                PtSession::from(&args.ptx_file),
-                args,
-            );
-            if json {
-                cmd.instrument(span).await?
-            } else {
-                cmd.await?
+            info!("ptarchive push start");
+            match args.global_opts.json {
+                true => {
+                    push(reference, PtSession::from(&args.ptx_file), args)
+                        .instrument(span)
+                        .await?;
+                    // allow metrics to flush
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        metrics::EXPORT_MILLIS + 100,
+                    ));
+                }
+                false => push(reference, PtSession::from(&args.ptx_file), args).await?,
             }
-
-            // allow metrics to flush
-            std::thread::sleep(std::time::Duration::from_millis(
-                metrics::EXPORT_MILLIS + 100,
-            ));
         }
         Commands::Pull(args) => {
             metrics::init(&args.global_opts);
