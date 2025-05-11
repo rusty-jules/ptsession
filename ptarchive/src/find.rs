@@ -47,39 +47,38 @@ fn by_file_duration(
         match ext {
             Some("wav") => {
                 // get the frame length of the file to match what pro tools stores
-                let r = WaveReader::open(file_path);
-                if let Err(e) = r {
-                    warn!(file = file_path.file_name(), "failed to open: {e}");
-                    return false;
+                let frame_length =
+                    WaveReader::open(file_path).and_then(|mut reader| reader.frame_length());
+
+                match frame_length {
+                    Ok(frame_length) => {
+                        let len = *missing_lengths
+                            .get(file_path.file_name())
+                            .expect("missing file to have length in ptsession")
+                            as u64;
+                        let len_matches = frame_length == len;
+
+                        if !no_duration {
+                            return len_matches;
+                        }
+
+                        if no_duration && !len_matches {
+                            warn!(
+                                file = file_path.file_name(),
+                                "wav has mismatched duration, but duration is being ignored for matching"
+                            );
+                        }
+
+                        return true;
+                    }
+                    Err(e) => {
+                        warn!(
+                            file = file_path.file_name(),
+                            "failed to read frame length: {e}"
+                        );
+                        return false;
+                    }
                 }
-
-                let fl = r.unwrap().frame_length();
-                if let Err(e) = fl {
-                    warn!(
-                        file = file_path.file_name(),
-                        "failed to read frame length: {e}",
-                    );
-                    return false;
-                }
-
-                let len = *missing_lengths
-                    .get(file_path.file_name())
-                    .expect("missing file to have length in ptsession")
-                    as u64;
-                let len_matches = fl.unwrap() == len;
-
-                if !no_duration {
-                    return len_matches;
-                }
-
-                if no_duration && !len_matches {
-                    warn!(
-                        file = file_path.file_name(),
-                        "wav has mismatched duration, but duration is being ignored for matching"
-                    );
-                }
-
-                return true;
             }
             Some(_) => {
                 error!(
@@ -112,24 +111,11 @@ fn by_file_unique_id(
 
         match ext {
             Some("wav") => {
-                let r = WaveReader::open(file_path);
-                if let Err(e) = r {
-                    warn!("failed to open file: {e}");
-                    return false;
-                }
+                let bext =
+                    WaveReader::open(file_path).and_then(|mut reader| reader.broadcast_extension());
 
-                let bext = r.unwrap().broadcast_extension();
-                if let Err(e) = bext {
-                    warn!("failed to read bext: {e}");
-                    return false;
-                }
-
-                match bext.unwrap() {
-                    None => {
-                        warn!("no bext found, cannot verify unique id");
-                        return true;
-                    }
-                    Some(bext) => {
+                match bext {
+                    Ok(Some(bext)) => {
                         if bext.originator != "Pro Tools" {
                             warn!("wav does not originate from Pro Tools, cannot verify unique id",);
                             return true;
@@ -143,6 +129,14 @@ fn by_file_unique_id(
                         // TODO: get originator references from pro tools session
                         debug!("originator reference: {id}");
                         return true;
+                    }
+                    Ok(None) => {
+                        warn!("no bext found, cannot verify unique id");
+                        return true;
+                    }
+                    Err(e) => {
+                        warn!("failed to read bext: {e}");
+                        return false;
                     }
                 }
             }
