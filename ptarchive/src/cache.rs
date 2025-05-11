@@ -1,6 +1,7 @@
-use super::SESSION;
+use super::{HDD, SESSION};
 use crate::Arguments;
 
+use oci_client::Reference;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use std::path::PathBuf;
@@ -9,16 +10,60 @@ const TARGET_SCHEMA_VERSION: i32 = 1;
 
 #[derive(Debug, Default)]
 pub struct DigestRecord {
-    pub digest: String,
-    pub filename: String,
-    pub absolute_path: String,
-    pub length: u64,
-    pub unique_id: Option<String>,
-    pub session: String,
-    pub hdd: String,
-    pub repository: String,
-    pub registry: String,
-    pub tag: String,
+    digest: Option<String>,
+    filename: String,
+    absolute_path: String,
+    length: u64,
+    unique_id: Option<String>,
+    session: String,
+    hdd: String,
+    repository: String,
+    registry: String,
+    tag: String,
+}
+
+// This is purely for convenience to avoid inserting a record with an empty digest string,
+// which could be handled by sql but we're trying to push as much logic as possible into the app.
+pub struct DigestRecordBuilder {
+    record: DigestRecord,
+}
+
+impl DigestRecord {
+    pub fn new(
+        filename: String,
+        absolute_path: String,
+        length: u64,
+        reference: &Reference,
+    ) -> DigestRecordBuilder {
+        DigestRecordBuilder {
+            record: DigestRecord {
+                filename,
+                absolute_path,
+                length,
+                session: SESSION.get().unwrap().to_string(),
+                hdd: HDD.get().unwrap().to_string(),
+                registry: reference.registry().to_string(),
+                repository: reference.repository().to_string(),
+                tag: reference.tag().unwrap().to_string(),
+                unique_id: None,
+                // not to be used without a digest yet
+                digest: None,
+            },
+        }
+    }
+}
+
+impl DigestRecordBuilder {
+    #[allow(dead_code)]
+    pub fn with_unique_id(mut self, unique_id: String) -> Self {
+        self.record.unique_id = Some(unique_id);
+        self
+    }
+
+    pub fn with_digest(mut self, digest: String) -> DigestRecord {
+        self.record.digest = Some(digest);
+        self.record
+    }
 }
 
 pub fn init_pool(config: &Arguments) -> rusqlite::Result<r2d2::Pool<SqliteConnectionManager>> {

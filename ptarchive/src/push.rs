@@ -278,7 +278,6 @@ async fn compress_and_upload(
 
     // Get file meta
     let (file, file_size, file_created, file_modified) = file_meta(file).await?;
-    let original_counter = register_counter!(BYTES_READ);
 
     // Check if the file already exists
     let conn = pool.get()?;
@@ -295,12 +294,14 @@ async fn compress_and_upload(
             .request(reqwest::Method::HEAD, url)
             .send()
             .await?;
-        let exists = blob_res.status().is_success();
-        if exists {
-            //compression_progress.finish_with_message(format!("Exists {file_name}"));
-            upload_progress.finish_with_message(format!("Exists {file_name}"));
+        if blob_res.status().is_success() {
+            upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
             info!("file already exists");
-            // FIXME: race condition here?
+            // FIXME: race condition here if the layer was pushed after we pulled all descriptors?
+            // May want to fetch the descriptor now that we know the blob exists, though that could
+            // turn into a request cascade if many files were already pushed.
+            // Zot would allow for a more refined request with graphql, but that would make this
+            // non-oci compliant.
             let (_, descriptor) = pushed_digests
                 .iter()
                 .find(|(_, descriptor)| descriptor.digest == digest)
@@ -309,22 +310,20 @@ async fn compress_and_upload(
         }
     }
 
+    // Scaffold our cache record with everything but the digest
+    let digest_record = DigestRecord::new(
+        // TODO: add compression level and type
+        file_path.file_name().to_string(),
+        file_path.absolute_path_string()?,
+        file_size,
+        reference,
+    );
+
+    // Register our metrics now that we're going to push
+    let original_counter = register_counter!(BYTES_READ);
     compression_progress.set_length(file_size);
 
     // Create digest reader to calculate original file digest
-    let mut digest_record = DigestRecord {
-        // TODO: add compression level and type
-        filename: file_path.file_name().to_string(),
-        absolute_path: file_path.absolute_path_string()?,
-        length: file_size,
-        unique_id: None,
-        session: SESSION.get().unwrap().to_string(),
-        hdd: HDD.get().unwrap().to_string(),
-        registry: reference.registry().to_string(),
-        repository: reference.repository().to_string(),
-        tag: reference.tag().unwrap().to_string(),
-        ..Default::default()
-    };
     let mut digest_reader = if !dry_run {
         DigestReader::new(file, None, Some(original_counter))
     } else {
@@ -333,6 +332,8 @@ async fn compress_and_upload(
     let original_digest_hasher = digest_reader.digest_handle();
 
     // Read the file into memory and compute the digest
+    // PERF: avoid this read and go back to streaming the digest since we have now
+    // confirmed that the blob doesn't exist by utilizing caching - or make this configurable
     let mut buf = Vec::with_capacity(file_size as usize);
     digest_reader.read_to_end(&mut buf).await?;
     let original_digest = original_digest_hasher.lock().unwrap().clone().finalize();
@@ -340,8 +341,7 @@ async fn compress_and_upload(
         compression_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
         upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
         info!("file already exists");
-        digest_record.digest = descriptor.digest.clone();
-        cache::insert_record(&conn, &digest_record)?;
+        cache::insert_record(&conn, &digest_record.with_digest(descriptor.digest.clone()))?;
         return Ok(descriptor.clone());
     }
 
@@ -410,8 +410,7 @@ async fn compress_and_upload(
     let compressed_size = compressed_size_tracker.load(Ordering::SeqCst);
 
     // Save to cache
-    digest_record.digest = compressed_digest.clone();
-    cache::insert_record(&conn, &digest_record)?;
+    cache::insert_record(&conn, &digest_record.with_digest(compressed_digest.clone()))?;
 
     // Set final upload progress bar length and position
     upload_progress.set_length(compressed_size as u64);
