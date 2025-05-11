@@ -1,3 +1,4 @@
+use crate::audio_file::AudioFilePath;
 use crate::FindArgs;
 
 use std::collections::HashMap;
@@ -19,58 +20,51 @@ use tracing::{debug, error, info, trace, warn};
 
 const DIR_ENTRY_CHANNEL_SIZE: usize = 100;
 
-fn to_name_and_path(entry: DirEntry) -> (String, PathBuf) {
-    let path = entry.into_path();
-    let name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .map(String::from)
-        .unwrap();
-    (name, path)
-}
-
 // TODO: ignore filenames (only length & unique id?)
-fn by_filename(missing_set: Arc<Mutex<HashSet<String>>>) -> impl FnMut(&(String, PathBuf)) -> bool {
-    move |(name, _): &(String, PathBuf)| -> bool {
+fn by_filename(missing_set: Arc<Mutex<HashSet<String>>>) -> impl FnMut(&AudioFilePath) -> bool {
+    move |file_path: &AudioFilePath| -> bool {
         missing_set
             .lock()
             .expect("get missing set lock")
-            .contains(name)
+            .contains(file_path.file_name())
     }
 }
 
 fn by_file_duration(
     missing_lengths: HashMap<String, usize>,
     no_duration: bool,
-) -> impl FnMut(&(String, PathBuf)) -> bool {
-    move |(name, path): &(String, PathBuf)| -> bool {
-        let ext = path.extension().and_then(OsStr::to_str);
+) -> impl FnMut(&AudioFilePath) -> bool {
+    move |file_path: &AudioFilePath| -> bool {
+        let ext = file_path.extension().and_then(OsStr::to_str);
 
-        let span = tracing::info_span!("by_file_duration", file = name, path = path.to_str(), ext);
+        let span = tracing::info_span!(
+            "by_file_duration",
+            file = file_path.file_name(),
+            path = file_path.to_str(),
+            ext
+        );
         let _guard = span.enter();
 
-        if ext.is_none() {
-            warn!(file = name, "unknown file extension");
-            return false;
-        }
-
-        match ext.unwrap() {
-            "wav" => {
+        match ext {
+            Some("wav") => {
                 // get the frame length of the file to match what pro tools stores
-                let r = WaveReader::open(path);
+                let r = WaveReader::open(file_path);
                 if let Err(e) = r {
-                    warn!(file = name, "failed to open: {e}");
+                    warn!(file = file_path.file_name(), "failed to open: {e}");
                     return false;
                 }
 
                 let fl = r.unwrap().frame_length();
                 if let Err(e) = fl {
-                    warn!(file = name, "failed to read frame length: {e}",);
+                    warn!(
+                        file = file_path.file_name(),
+                        "failed to read frame length: {e}",
+                    );
                     return false;
                 }
 
                 let len = *missing_lengths
-                    .get(name)
+                    .get(file_path.file_name())
                     .expect("missing file to have length in ptsession")
                     as u64;
                 let len_matches = fl.unwrap() == len;
@@ -81,15 +75,22 @@ fn by_file_duration(
 
                 if no_duration && !len_matches {
                     warn!(
-                        file = name,
+                        file = file_path.file_name(),
                         "wav has mismatched duration, but duration is being ignored for matching"
                     );
                 }
 
                 return true;
             }
-            _ => {
-                error!(file = name, "cannot match duration by this file type");
+            Some(_) => {
+                error!(
+                    file = file_path.file_name(),
+                    "cannot match duration by this file type"
+                );
+                return false;
+            }
+            None => {
+                warn!(file = file_path.file_name(), "unknown file extension");
                 return false;
             }
         }
@@ -98,22 +99,21 @@ fn by_file_duration(
 
 fn by_file_unique_id(
     _missing_unique_ids: HashMap<String, String>,
-) -> impl FnMut(&(String, PathBuf)) -> bool {
-    |(name, path): &(String, PathBuf)| -> bool {
-        let ext = path.extension().and_then(OsStr::to_str);
+) -> impl FnMut(&AudioFilePath) -> bool {
+    |file_path: &AudioFilePath| -> bool {
+        let ext = file_path.extension().and_then(OsStr::to_str);
 
-        let span =
-            tracing::debug_span!("by_file_unique_id", file = name, path = path.to_str(), ext);
+        let span = tracing::debug_span!(
+            "by_file_unique_id",
+            file = file_path.file_name(),
+            path = file_path.to_str(),
+            ext
+        );
         let _guard = span.enter();
 
-        if ext.is_none() {
-            warn!("unknown file extension");
-            return false;
-        }
-
-        match ext.unwrap() {
-            "wav" => {
-                let r = WaveReader::open(path);
+        match ext {
+            Some("wav") => {
+                let r = WaveReader::open(file_path);
                 if let Err(e) = r {
                     warn!("failed to open file: {e}");
                     return false;
@@ -147,8 +147,12 @@ fn by_file_unique_id(
                     }
                 }
             }
-            _ => {
+            Some(_) => {
                 warn!("cannot match by extension for file type");
+                return false;
+            }
+            None => {
+                warn!("unknown file extension");
                 return false;
             }
         }
@@ -157,25 +161,24 @@ fn by_file_unique_id(
 
 fn remove_from_missing(
     missing_set: Arc<Mutex<HashSet<String>>>,
-) -> impl FnMut((String, PathBuf)) -> (String, PathBuf) {
-    move |(name, path): (String, PathBuf)| -> (String, PathBuf) {
-        let span = tracing::trace_span!("remove from missing", file = name, path = path.to_str());
+) -> impl FnMut(AudioFilePath) -> AudioFilePath {
+    move |file_path: AudioFilePath| -> AudioFilePath {
+        let span = tracing::trace_span!(
+            "remove from missing",
+            file = file_path.file_name(),
+            path = file_path.to_str()
+        );
         let _guard = span.enter();
         let existed = missing_set
             .lock()
             .expect("get missing files set lock")
-            .remove(&name);
+            .remove(file_path.file_name());
         if !existed {
             trace!("received a file that did not exist in the missing set");
         }
         trace!("found file");
-        (name, path)
+        file_path
     }
-}
-
-fn format_name_to_artifact_path((name, path): (String, PathBuf)) -> (String, PathBuf) {
-    // NOTE: not sure if "Audio Files" should be prepended here
-    (format!("Audio Files/{name}"), path)
 }
 
 fn start_walkers(
@@ -264,9 +267,9 @@ async fn start_stream(
     missing_lengths: HashMap<String, usize>,
     missing_unique_ids: HashMap<String, String>,
     rx: mpsc::Receiver<DirEntry>,
-) -> Vec<(String, PathBuf)> {
-    let mut files_stream: Pin<Box<dyn Stream<Item = (String, PathBuf)>>> =
-        Box::pin(ReceiverStream::new(rx).map(to_name_and_path));
+) -> Vec<AudioFilePath> {
+    let mut files_stream: Pin<Box<dyn Stream<Item = AudioFilePath>>> =
+        Box::pin(ReceiverStream::new(rx).map(AudioFilePath::from));
 
     if !*no_filename {
         files_stream = Box::pin(files_stream.filter(by_filename(missing_set.clone())));
@@ -282,8 +285,7 @@ async fn start_stream(
 
     files_stream
         .map(remove_from_missing(missing_set.clone()))
-        .map(format_name_to_artifact_path)
-        .collect::<Vec<(String, PathBuf)>>()
+        .collect::<Vec<AudioFilePath>>()
         .await
 }
 
@@ -293,7 +295,7 @@ pub async fn find_files(
     parallelism: usize,
     find_args: &FindArgs,
     pool: r2d2::Pool<SqliteConnectionManager>,
-) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<AudioFilePath>, Box<dyn std::error::Error + Send + Sync>> {
     // TODO: look up missing_file paths by session and filename in cache
 
     if find_args.ignore_missing || missing_files.is_empty() {

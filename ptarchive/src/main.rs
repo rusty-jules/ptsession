@@ -1,5 +1,6 @@
 mod annotations;
 mod args;
+mod audio_file;
 mod cache;
 mod client;
 mod compression;

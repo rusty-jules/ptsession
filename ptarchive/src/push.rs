@@ -1,4 +1,5 @@
 use crate::args::{CompressionOpts, PushArgs};
+use crate::audio_file::AudioFilePath;
 use crate::cache::{self, DigestRecord};
 use crate::client::HttpClient;
 use crate::compression::Compression;
@@ -12,6 +13,7 @@ use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 use crate::{annotations::*, HDD, SESSION};
 
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -261,8 +263,7 @@ async fn compress_and_upload(
     pool: r2d2::Pool<SqliteConnectionManager>,
     client: &oci_client::Client,
     reference: &Reference,
-    file_name: String,
-    file_path: &Path,
+    file_path: AudioFilePath,
     compression: Compression,
     level: i32,
     compression_progress: ProgressBar,
@@ -273,7 +274,7 @@ async fn compress_and_upload(
     // Create a shared http client wrapper for this operation
     let http_client = HttpClient::new(client);
     // Open the file
-    let file = File::open(file_path).await?;
+    let file = File::open(&file_path).await?;
 
     // Get file meta
     let (file, file_size, file_created, file_modified) = file_meta(file).await?;
@@ -281,7 +282,8 @@ async fn compress_and_upload(
 
     // Check if the file already exists
     let conn = pool.get()?;
-    if let Some(digest) = cache::get_digest_by_name_and_session(&conn, &file_name)? {
+    // FIXME: use get_file_by_absolute_path
+    if let Some(digest) = cache::get_digest_by_name_and_session(&conn, file_path.file_name())? {
         let url = format!(
             "{}://{}/v2/{}/blobs/{}",
             "http", // FIXME: Assuming HTTP
@@ -312,8 +314,8 @@ async fn compress_and_upload(
     // Create digest reader to calculate original file digest
     let mut digest_record = DigestRecord {
         // TODO: add compression level and type
-        filename: file_name.clone(),
-        absolute_path: file_path.canonicalize()?.to_string_lossy().to_string(),
+        filename: file_path.file_name().to_string(),
+        absolute_path: file_path.absolute_path_string()?,
         length: file_size,
         unique_id: None,
         session: SESSION.get().unwrap().to_string(),
@@ -335,8 +337,8 @@ async fn compress_and_upload(
     digest_reader.read_to_end(&mut buf).await?;
     let original_digest = original_digest_hasher.lock().unwrap().clone().finalize();
     if let Some(descriptor) = pushed_digests.get(&format!("sha256:{:x}", original_digest)) {
-        compression_progress.finish_with_message(format!("Exists {file_name}"));
-        upload_progress.finish_with_message(format!("Exists {file_name}"));
+        compression_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
+        upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
         info!("file already exists");
         digest_record.digest = descriptor.digest.clone();
         cache::insert_record(&conn, &digest_record)?;
@@ -387,7 +389,7 @@ async fn compress_and_upload(
     };
 
     // Set up upload progress bar
-    upload_progress.set_message(format!("Uploading {file_name}"));
+    upload_progress.set_message(format!("Uploading {}", file_path.file_name()));
     info!("uploading file");
 
     if !dry_run {
@@ -423,12 +425,12 @@ async fn compress_and_upload(
     }
 
     // Mark progress bars as complete
-    upload_progress.finish_with_message(format!("Upload complete {file_name}"));
+    upload_progress.finish_with_message(format!("Upload complete {}", file_path.file_name()));
     info!("upload complete");
 
     // Output OciDescriptor of the layer
     let mut annotations = maplit::btreemap! {
-        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_name,
+        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.title(),
         ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => file_created,
         IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
         IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
@@ -440,6 +442,7 @@ async fn compress_and_upload(
         annotations.insert(IO_PTSESSION_TIME_MODIFIED.to_string(), modified);
     }
 
+    // TODO: handle audio files other than wav with symphonia
     let media_type = match compression {
         Compression::None => "audio/vnd.wav".to_string(),
         _ => format!("audio/vnd.wav+{}", compression.to_string()),
@@ -647,9 +650,9 @@ pub async fn push(
             }
         });
 
-    let all_files: Vec<(String, PathBuf)> = file_names
+    let all_files: Vec<AudioFilePath> = file_names
         .into_iter()
-        .map(|file_name| (file_name.clone(), PathBuf::from(file_name)))
+        .map(|file_name| AudioFilePath::try_from(PathBuf::from(file_name)).unwrap())
         .chain(
             find_files(
                 &session,
@@ -683,7 +686,7 @@ pub async fn push(
     let file_errors = register_counter!(FILE_FAILURES);
 
     let layers: Vec<OciDescriptor> = futures_util::stream::iter(all_files)
-        .map(|(file_name, file_path)| {
+        .map(|file_path| {
             let pool = pool.clone();
             let client = client.clone();
             let reference = reference.clone();
@@ -694,16 +697,16 @@ pub async fn push(
                 // Create progress bars for this file
                 let compression_progress = multi_progress.add(ProgressBar::new(0));
                 compression_progress.set_style(ProgressStyle::clone(&*COMPRESSION_STYLE));
-                compression_progress.set_message(format!("Compressing {}", file_name));
+                compression_progress.set_message(format!("Compressing {}", file_path.file_name()));
 
                 let upload_progress = multi_progress.add(ProgressBar::new(0));
                 upload_progress.set_style(ProgressStyle::clone(&*UPLOAD_STYLE));
-                upload_progress.set_message(format!("Uploading {}", file_name));
+                upload_progress.set_message(format!("Uploading {}", file_path.file_name()));
 
                 let span = tracing::info_span!(
                     "upload",
-                    file = file_path.file_name().unwrap().to_str(),
-                    path = file_path.to_str(),
+                    file = file_path.file_name(),
+                    path = file_path.absolute_path_string()?,
                 );
 
                 // Process the file
@@ -711,8 +714,7 @@ pub async fn push(
                     pool,
                     &client,
                     &reference,
-                    file_name,
-                    &file_path,
+                    file_path,
                     *compression,
                     *level,
                     compression_progress,
