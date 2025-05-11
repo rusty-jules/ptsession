@@ -1,3 +1,4 @@
+use crate::annotations::*;
 use crate::args::{CompressionOpts, PushArgs};
 use crate::audio_file::AudioFilePath;
 use crate::cache::{self, DigestRecord};
@@ -10,7 +11,6 @@ use crate::metrics::{
     TOTAL_BYTES_WRITTEN, UPLOAD_SPEED,
 };
 use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
-use crate::{annotations::*, HDD, SESSION};
 
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
@@ -42,8 +42,6 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, warn, Instrument};
-
-//const BUF_CAPACITY: usize = 64 * 1024; // 64KB
 
 // Stream that calculates digests while reading
 struct DigestReader<R>

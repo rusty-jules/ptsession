@@ -1,3 +1,7 @@
+//! Courtesy of Claude and copious massaging.
+//! Probably want to just shell out to diskutil instead but we'll
+//! see how much work the linux implementation is.
+
 #![cfg(target_os = "macos")]
 
 use std::ffi::{CStr, CString};
@@ -18,8 +22,6 @@ use IOKit_sys::{
     kIOMasterPortDefault, IOObjectConformsTo, IORegistryEntryCreateCFProperty,
     IORegistryEntryGetParentEntry, IOServiceGetMatchingService, IOServiceMatching,
 };
-
-/// Set up Vector metrics shipping
 
 #[repr(transparent)]
 struct Statfs(libc::statfs);

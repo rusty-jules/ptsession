@@ -36,8 +36,9 @@ pub struct Arguments {
 impl Arguments {
     // merge options from the config file with individual command arguments
     // FIXME: figure out a better way to do this...
-    // this problem is that we want both `--json` as a cli argument and
-    // log.format = "json" in the config file
+    // the problem is that we want both `--json` as a cli argument and
+    // log.format = "json" in the config file, which gets tricky with subcommands
+    // having the same argument
     pub fn merge(&mut self) {
         let json = self
             .logs
@@ -99,6 +100,7 @@ pub struct GlobalOpts {
 }
 
 #[derive(Clone, Debug, Args, Serialize, Deserialize, Default)]
+// TODO: add log level
 pub struct Logs {
     #[arg(long = "logs-format", default_value_t = InfoPrintArgs::Text, hide(true))]
     pub format: InfoPrintArgs,

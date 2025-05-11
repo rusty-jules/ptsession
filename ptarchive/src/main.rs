@@ -72,12 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tag = reference.tag(),
                 path = args.ptx_file.canonicalize()?.to_str(),
             );
+            // TODO: make caching configurable with args.no_cache and an Option
             let pool = cache::init_pool(&config)?;
-            //let pool = if args.no_cache {
-            //None
-            //} else {
-            //Some(cache::init_pool(&config)?)
-            //};
             match args.global_opts.json {
                 true => {
                     push(reference, PtSession::from(&args.ptx_file), pool, args)

@@ -20,7 +20,6 @@ use tracing::{debug, error, info, trace, warn};
 
 const DIR_ENTRY_CHANNEL_SIZE: usize = 100;
 
-// TODO: ignore filenames (only length & unique id?)
 fn by_filename(missing_set: Arc<Mutex<HashSet<String>>>) -> impl FnMut(&AudioFilePath) -> bool {
     move |file_path: &AudioFilePath| -> bool {
         missing_set
@@ -275,7 +274,7 @@ async fn start_stream(
         files_stream = Box::pin(files_stream.filter(by_filename(missing_set.clone())));
     }
 
-    // TODO: add an `extract_meta` .map() to generalize metadata across types and avoid
+    // PERF: add an `extract_meta` .map() to generalize metadata across types and avoid
     // double opening files for duration and unique id
     files_stream = Box::pin(files_stream.filter(by_file_duration(missing_lengths, *no_duration)));
 
@@ -294,10 +293,9 @@ pub async fn find_files(
     missing_files: Vec<String>,
     parallelism: usize,
     find_args: &FindArgs,
-    pool: r2d2::Pool<SqliteConnectionManager>,
-) -> Result<Vec<AudioFilePath>, Box<dyn std::error::Error + Send + Sync>> {
     // TODO: look up missing_file paths by session and filename in cache
-
+    _pool: r2d2::Pool<SqliteConnectionManager>,
+) -> Result<Vec<AudioFilePath>, Box<dyn std::error::Error + Send + Sync>> {
     if find_args.ignore_missing || missing_files.is_empty() {
         if !missing_files.is_empty() {
             info!("ignoring {} missing audio files", missing_files.len());
@@ -347,6 +345,9 @@ pub async fn find_files(
         .collect::<HashMap<String, usize>>();
 
     // TODO: get missing unique ids
+    // We may never actually do this because PT seems to store the unique_ids it will search for
+    // in a bespoke, per-machine workspace database that is not part of session files, so we have
+    // no way to find them from the session alone when not on the machine that created it
     let missing_unique_ids = HashMap::new();
 
     // Kick off the search
