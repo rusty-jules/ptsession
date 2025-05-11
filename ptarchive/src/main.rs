@@ -18,11 +18,9 @@ use crate::metrics::VolumeInfo;
 use crate::pull::*;
 use crate::push::*;
 
+use std::ops::Not;
 use std::str::FromStr;
 
-use clap::Parser;
-use figment::providers::{Format, Serialized, Toml};
-use figment::Figment;
 use oci_client::Reference;
 use ptsession::PtSession;
 use tokio::sync::OnceCell;
@@ -33,16 +31,7 @@ pub static HDD: OnceCell<String> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let cli = Arguments::parse();
-    let cfg_path = cli.config.to_string_lossy().to_string();
-
-    let mut config = Figment::new()
-        .merge(Serialized::defaults(cli))
-        .merge(Toml::file(shellexpand::tilde(&cfg_path).as_ref()))
-        .extract::<Arguments>()
-        .inspect_err(|e| eprintln!("config: {e}"))?;
-
-    config.merge();
+    let config = Arguments::get()?;
 
     match &config.command {
         Commands::Push(args) => {
@@ -72,8 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tag = reference.tag(),
                 path = args.ptx_file.canonicalize()?.to_str(),
             );
-            // TODO: make caching configurable with args.no_cache and an Option
-            let pool = cache::init_pool(&config)?;
+            let pool = args
+                .no_cache
+                .not()
+                .then(|| cache::init_pool(&config))
+                .transpose()?;
             match args.global_opts.json {
                 true => {
                     push(reference, PtSession::from(&args.ptx_file), pool, args)

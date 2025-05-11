@@ -288,7 +288,7 @@ pub async fn find_files(
     parallelism: usize,
     find_args: &FindArgs,
     // TODO: look up missing_file paths by session and filename in cache
-    _pool: r2d2::Pool<SqliteConnectionManager>,
+    _pool: Option<r2d2::Pool<SqliteConnectionManager>>,
 ) -> Result<Vec<AudioFilePath>, Box<dyn std::error::Error + Send + Sync>> {
     if find_args.ignore_missing || missing_files.is_empty() {
         if !missing_files.is_empty() {

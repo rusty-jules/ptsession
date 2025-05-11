@@ -4,6 +4,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use figment::providers::{Format, Serialized, Toml};
+use figment::Figment;
 use serde::{Deserialize, Serialize};
 
 static DEFAULT_CONFIG: &str = "~/.ptarchive/config.toml";
@@ -34,6 +36,25 @@ pub struct Arguments {
 }
 
 impl Arguments {
+    pub fn get() -> Result<Arguments, Box<dyn std::error::Error + Send + Sync>> {
+        let cli = Arguments::parse();
+        let raw_cfg_path = cli.config.to_string_lossy().to_string();
+        let cfg_path = shellexpand::tilde(&raw_cfg_path);
+
+        let mut config = Figment::new().merge(Serialized::defaults(cli));
+
+        if std::fs::exists(cfg_path.as_ref())? {
+            config = config.merge(Toml::file(cfg_path.as_ref()));
+        }
+
+        let mut config = config
+            .extract::<Arguments>()
+            .inspect_err(|e| eprintln!("config: {e}"))?;
+
+        config.merge();
+        Ok(config)
+    }
+
     // merge options from the config file with individual command arguments
     // FIXME: figure out a better way to do this...
     // the problem is that we want both `--json` as a cli argument and
@@ -243,10 +264,9 @@ pub struct PushArgs {
     #[serde(skip)]
     pub global_opts: GlobalOpts,
 
-    /// Do not cache pushed file digests in sqlite database
     //#[arg(short, long, default_value = DEFAULT_CACHE)]
     //pub cache: String,
-
+    /// Do not cache pushed file digests in sqlite database
     #[arg(long, action)]
     pub no_cache: bool,
 }

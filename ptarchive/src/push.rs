@@ -258,7 +258,7 @@ async fn end_push_chunked_session(
 }
 
 async fn compress_and_upload(
-    pool: r2d2::Pool<SqliteConnectionManager>,
+    pool: Option<r2d2::Pool<SqliteConnectionManager>>,
     client: &oci_client::Client,
     reference: &Reference,
     file_path: AudioFilePath,
@@ -278,35 +278,40 @@ async fn compress_and_upload(
     let (file, file_size, file_created, file_modified) = file_meta(file).await?;
 
     // Check if the file already exists
-    let conn = pool.get()?;
-    // FIXME: use get_file_by_absolute_path
-    if let Some(digest) = cache::get_digest_by_name_and_session(&conn, file_path.file_name())? {
-        let url = format!(
-            "{}://{}/v2/{}/blobs/{}",
-            "http", // FIXME: Assuming HTTP
-            reference.resolve_registry(),
-            reference.repository(),
-            digest
-        );
-        let blob_res = reqwest::Client::new()
-            .request(reqwest::Method::HEAD, url)
-            .send()
-            .await?;
-        if blob_res.status().is_success() {
-            upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
-            info!("file already exists");
-            // FIXME: race condition here if the layer was pushed after we pulled all descriptors?
-            // May want to fetch the descriptor now that we know the blob exists, though that could
-            // turn into a request cascade if many files were already pushed.
-            // Zot would allow for a more refined request with graphql, but that would make this
-            // non-oci compliant.
-            let (_, descriptor) = pushed_digests
-                .iter()
-                .find(|(_, descriptor)| descriptor.digest == digest)
-                .expect("descriptor exists in pushed digests");
-            return Ok(descriptor.clone());
+    let conn = if let Some(pool) = pool {
+        let conn = pool.get()?;
+        // FIXME: use get_file_by_absolute_path
+        if let Some(digest) = cache::get_digest_by_name_and_session(&conn, file_path.file_name())? {
+            let url = format!(
+                "{}://{}/v2/{}/blobs/{}",
+                "http", // FIXME: Assuming HTTP
+                reference.resolve_registry(),
+                reference.repository(),
+                digest
+            );
+            let blob_res = reqwest::Client::new()
+                .request(reqwest::Method::HEAD, url)
+                .send()
+                .await?;
+            if blob_res.status().is_success() {
+                upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
+                info!("file already exists");
+                // FIXME: race condition here if the layer was pushed after we pulled all descriptors?
+                // May want to fetch the descriptor now that we know the blob exists, though that could
+                // turn into a request cascade if many files were already pushed.
+                // Zot would allow for a more refined request with graphql, but that would make this
+                // non-oci compliant.
+                let (_, descriptor) = pushed_digests
+                    .iter()
+                    .find(|(_, descriptor)| descriptor.digest == digest)
+                    .expect("descriptor exists in pushed digests");
+                return Ok(descriptor.clone());
+            }
         }
-    }
+        Some(conn)
+    } else {
+        None
+    };
 
     // Scaffold our cache record with everything but the digest
     let digest_record = DigestRecord::new(
@@ -339,7 +344,9 @@ async fn compress_and_upload(
         compression_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
         upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
         info!("file already exists");
-        cache::insert_record(&conn, &digest_record.with_digest(descriptor.digest.clone()))?;
+        if let Some(conn) = conn {
+            cache::insert_record(&conn, &digest_record.with_digest(descriptor.digest.clone()))?;
+        }
         return Ok(descriptor.clone());
     }
 
@@ -408,7 +415,9 @@ async fn compress_and_upload(
     let compressed_size = compressed_size_tracker.load(Ordering::SeqCst);
 
     // Save to cache
-    cache::insert_record(&conn, &digest_record.with_digest(compressed_digest.clone()))?;
+    if let Some(conn) = conn {
+        cache::insert_record(&conn, &digest_record.with_digest(compressed_digest.clone()))?;
+    }
 
     // Set final upload progress bar length and position
     upload_progress.set_length(compressed_size as u64);
@@ -619,7 +628,7 @@ async fn push_manifest(
 pub async fn push(
     reference: Reference,
     session: PtSession,
-    pool: r2d2::Pool<SqliteConnectionManager>,
+    pool: Option<r2d2::Pool<SqliteConnectionManager>>,
     PushArgs {
         compression:
             CompressionOpts {

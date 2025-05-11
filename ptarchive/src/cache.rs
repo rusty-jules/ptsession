@@ -86,6 +86,7 @@ pub fn init_pool(config: &Arguments) -> rusqlite::Result<r2d2::Pool<SqliteConnec
 
         Ok(pool)
     } else {
+        tracing::error!("Failed to initialize cache pool");
         Err(rusqlite::Error::InvalidPath(PathBuf::from("")))
     }
 }
@@ -110,6 +111,8 @@ pub fn insert_record(conn: &rusqlite::Connection, rec: &DigestRecord) -> rusqlit
     )
 }
 
+#[allow(dead_code)]
+// TODO: use this one
 pub fn get_digest_by_absolute_path(
     conn: &rusqlite::Connection,
     path: &str,
@@ -140,10 +143,12 @@ pub fn get_digest_by_name_and_session(
     }
 }
 
+#[allow(dead_code)]
 pub fn get_path_by_name() {
     unimplemented!()
 }
 
+#[allow(dead_code)]
 pub fn get_record(
     conn: &rusqlite::Connection,
     digest: &str,
