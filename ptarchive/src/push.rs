@@ -23,7 +23,6 @@ use std::task::{Context, Poll};
 
 use async_compression::Level;
 use futures_util::{future, Stream, StreamExt, TryStreamExt};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use metrics::{counter, register_counter, register_histogram, Counter};
 use oci_client::{
     annotations::{ORG_OPENCONTAINERS_IMAGE_CREATED, ORG_OPENCONTAINERS_IMAGE_TITLE},
@@ -41,7 +40,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{debug, error, info, trace, warn, Instrument};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 // Stream that calculates digests while reading
 struct DigestReader<R>
@@ -50,17 +50,15 @@ where
 {
     inner: R,
     hasher: Arc<Mutex<Sha256>>,
-    progress: Option<ProgressBar>,
     metric: Option<Counter>,
     size: Arc<AtomicUsize>,
 }
 
 impl<R: AsyncRead + Unpin> DigestReader<R> {
-    fn new(inner: R, progress: Option<ProgressBar>, metric: Option<Counter>) -> Self {
+    fn new(inner: R, metric: Option<Counter>) -> Self {
         Self {
             inner,
             hasher: Arc::new(Mutex::new(Sha256::new())),
-            progress,
             metric,
             size: Arc::new(AtomicUsize::new(0)),
         }
@@ -94,10 +92,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for DigestReader<R> {
                     let mut hasher = self.hasher.lock().unwrap();
                     hasher.update(&buf.filled()[original_filled..]);
 
-                    // Update progress if provided
-                    if let Some(progress) = &self.progress {
-                        progress.inc(bytes_read as u64);
-                    }
                     if let Some(counter) = &self.metric {
                         counter.increment(bytes_read as u64);
                     }
@@ -264,8 +258,6 @@ async fn compress_and_upload(
     file_path: AudioFilePath,
     compression: Compression,
     level: i32,
-    compression_progress: ProgressBar,
-    upload_progress: ProgressBar,
     pushed_digests: BTreeMap<String, OciDescriptor>,
     dry_run: bool,
 ) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
@@ -276,6 +268,9 @@ async fn compress_and_upload(
 
     // Get file meta
     let (file, file_size, file_created, file_modified) = file_meta(file).await?;
+    let span = tracing::span::Span::current();
+    span.pb_set_style(&UPLOAD_STYLE);
+    span.pb_set_message(&format!("Uploading {}", file_path.file_name()));
 
     // Check if the file already exists
     let conn = if let Some(pool) = pool {
@@ -294,7 +289,6 @@ async fn compress_and_upload(
                 .send()
                 .await?;
             if blob_res.status().is_success() {
-                upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
                 info!("file already exists");
                 // FIXME: race condition here if the layer was pushed after we pulled all descriptors?
                 // May want to fetch the descriptor now that we know the blob exists, though that could
@@ -324,25 +318,48 @@ async fn compress_and_upload(
 
     // Register our metrics now that we're going to push
     let original_counter = register_counter!(BYTES_READ);
-    compression_progress.set_length(file_size);
 
     // Create digest reader to calculate original file digest
-    let mut digest_reader = if !dry_run {
-        DigestReader::new(file, None, Some(original_counter))
+    let source = if dry_run {
+        File::from_std(tempfile()?)
     } else {
-        DigestReader::new(File::from_std(tempfile()?), None, Some(original_counter))
+        file
     };
+    let digest_reader = DigestReader::new(source, Some(original_counter));
     let original_digest_hasher = digest_reader.digest_handle();
+
+    // Setup compression progress bar, tracking how much we've read from the source
+    let compression_span = tracing::trace_span!("compressing", file = file_path.file_name());
+    compression_span.pb_set_message(&format!("Compressing {}", file_path.file_name()));
+    compression_span.pb_set_length(file_size);
+    compression_span.pb_set_style(&COMPRESSION_STYLE);
+
+    let digest_stream = ReaderStream::new(digest_reader).and_then(move |bytes| {
+        let _guard = compression_span.enter();
+        compression_span.pb_inc(bytes.len() as u64);
+        futures_util::future::ok(bytes)
+    });
 
     // Read the file into memory and compute the digest
     // PERF: avoid this read and go back to streaming the digest since we have now
     // confirmed that the blob doesn't exist by utilizing caching - or make this configurable
-    let mut buf = Vec::with_capacity(file_size as usize);
-    digest_reader.read_to_end(&mut buf).await?;
+    let buf = digest_stream
+        .fold(Ok(Vec::new()), |acc, bytes| {
+            use futures_util::future::{err, ok};
+            match acc {
+                Ok(mut acc) => match bytes {
+                    Ok(bytes) => {
+                        acc.extend_from_slice(&bytes);
+                        ok(acc)
+                    }
+                    Err(e) => return err(e),
+                },
+                Err(e) => return err(e),
+            }
+        })
+        .await?;
     let original_digest = original_digest_hasher.lock().unwrap().clone().finalize();
     if let Some(descriptor) = pushed_digests.get(&format!("sha256:{:x}", original_digest)) {
-        compression_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
-        upload_progress.finish_with_message(format!("Exists {}", file_path.file_name()));
         info!("file already exists");
         if let Some(conn) = conn {
             cache::insert_record(&conn, &digest_record.with_digest(descriptor.digest.clone()))?;
@@ -361,24 +378,19 @@ async fn compress_and_upload(
     let upload_speed = register_histogram!(UPLOAD_SPEED);
 
     // Create digest reader to calculate compressed file digest
-    let compressed_digest_reader = DigestReader::new(
-        encoder,
-        Some(compression_progress),
-        Some(compressed_counter),
-    );
+    let compressed_digest_reader = DigestReader::new(encoder, Some(compressed_counter));
     let compressed_digest_hasher = compressed_digest_reader.digest_handle();
     let compressed_size_tracker = compressed_digest_reader.size_tracker();
 
     // Clone progress items for stream op
-    let progress_stream = upload_progress.clone();
     let progress_size_tracker = compressed_size_tracker.clone();
 
-    // Create stream
+    // Create upload stream
     let start = std::time::Instant::now();
     let chunk_stream = ReaderStream::new(compressed_digest_reader).and_then(move |bytes| {
         let size = progress_size_tracker.load(Ordering::SeqCst) as u64;
-        progress_stream.set_length(size);
-        progress_stream.inc(bytes.len() as u64);
+        span.pb_set_length(size);
+        span.pb_inc(bytes.len() as u64);
 
         let elapsed = start.elapsed().as_secs_f64();
         upload_speed.record(size as f64 / elapsed);
@@ -393,9 +405,7 @@ async fn compress_and_upload(
         "".to_string()
     };
 
-    // Set up upload progress bar
-    upload_progress.set_message(format!("Uploading {}", file_path.file_name()));
-    info!("uploading file");
+    trace!("uploading file");
 
     if !dry_run {
         push_stream(&http_client, &location, &reference, chunk_stream).await?;
@@ -419,10 +429,6 @@ async fn compress_and_upload(
         cache::insert_record(&conn, &digest_record.with_digest(compressed_digest.clone()))?;
     }
 
-    // Set final upload progress bar length and position
-    upload_progress.set_length(compressed_size as u64);
-    upload_progress.set_position(compressed_size as u64);
-
     // Finish the upload
     if !dry_run {
         let _blob_url =
@@ -430,8 +436,6 @@ async fn compress_and_upload(
                 .await?;
     }
 
-    // Mark progress bars as complete
-    upload_progress.finish_with_message(format!("Upload complete {}", file_path.file_name()));
     info!("upload complete");
 
     // Output OciDescriptor of the layer
@@ -678,9 +682,6 @@ pub async fn push(
     });
     let auth = RegistryAuth::Anonymous;
 
-    // Create a multi-progress bar
-    let multi_progress = MultiProgress::new();
-
     // fetch all original digests
     let original_digests = fetch_original_digests(&client, &reference, &auth).await?;
 
@@ -696,19 +697,9 @@ pub async fn push(
             let pool = pool.clone();
             let client = client.clone();
             let reference = reference.clone();
-            let multi_progress = multi_progress.clone();
             let original_digests = original_digests.clone();
 
             async move {
-                // Create progress bars for this file
-                let compression_progress = multi_progress.add(ProgressBar::new(0));
-                compression_progress.set_style(ProgressStyle::clone(&*COMPRESSION_STYLE));
-                compression_progress.set_message(format!("Compressing {}", file_path.file_name()));
-
-                let upload_progress = multi_progress.add(ProgressBar::new(0));
-                upload_progress.set_style(ProgressStyle::clone(&*UPLOAD_STYLE));
-                upload_progress.set_message(format!("Uploading {}", file_path.file_name()));
-
                 let span = tracing::info_span!(
                     "upload",
                     file = file_path.file_name(),
@@ -723,8 +714,6 @@ pub async fn push(
                     file_path,
                     *compression,
                     *level,
-                    compression_progress,
-                    upload_progress,
                     original_digests,
                     *dry_run,
                 )

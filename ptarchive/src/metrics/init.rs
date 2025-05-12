@@ -70,7 +70,7 @@ pub fn init(
     });
     let metrics_layer = metrics.is_some().then(|| MetricsLayer::new());
 
-    let indicatif_layer = IndicatifLayer::new();
+    let indicatif_layer = IndicatifLayer::new().with_max_progress_bars(1000, None);
     let text = json.not().then(|| {
         tracing_subscriber::fmt::layer()
             .without_time()
