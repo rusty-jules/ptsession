@@ -12,7 +12,6 @@ use crate::metrics::{
 };
 use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 
-use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -22,11 +21,10 @@ use std::task::{Context, Poll};
 
 use async_compression::Level;
 use futures_util::{future, Stream, StreamExt, TryStreamExt};
-use metrics::{counter, register_counter, register_histogram, Counter};
+use metrics::{counter, register_counter, register_histogram};
 use oci_client::{
     annotations::{ORG_OPENCONTAINERS_IMAGE_CREATED, ORG_OPENCONTAINERS_IMAGE_TITLE},
     client::{ClientConfig, Config, PushResponse},
-    errors::OciDistributionError,
     manifest::{OciDescriptor, OciImageManifest, OCI_IMAGE_MEDIA_TYPE},
     secrets::RegistryAuth,
     Reference,
@@ -39,7 +37,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, ReadBuf};
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{ReaderStream, StreamReader};
-use tracing::{debug, error, info, trace, warn, Instrument};
+use tracing::{debug, info, trace, warn, Instrument};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 // Stream that calculates digests while reading
@@ -49,16 +47,14 @@ where
 {
     inner: R,
     hasher: Arc<Mutex<Sha256>>,
-    metric: Option<Counter>,
     size: Arc<AtomicUsize>,
 }
 
 impl<R: AsyncRead + Unpin> DigestReader<R> {
-    fn new(inner: R, metric: Option<Counter>) -> Self {
+    fn new(inner: R) -> Self {
         Self {
             inner,
             hasher: Arc::new(Mutex::new(Sha256::new())),
-            metric,
             size: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -90,10 +86,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for DigestReader<R> {
                     // Update digest
                     let mut hasher = self.hasher.lock().unwrap();
                     hasher.update(&buf.filled()[original_filled..]);
-
-                    if let Some(counter) = &self.metric {
-                        counter.increment(bytes_read as u64);
-                    }
 
                     // Update size counter
                     self.size.fetch_add(bytes_read, Ordering::SeqCst);
@@ -339,7 +331,7 @@ async fn compress_and_upload(
     } else {
         file
     };
-    let digest_reader = DigestReader::new(source, Some(original_counter));
+    let digest_reader = DigestReader::new(source);
     let original_digest_hasher = digest_reader.digest_handle();
 
     // Setup compression progress bar, tracking how much we've read from the source
@@ -350,6 +342,7 @@ async fn compress_and_upload(
 
     let digest_stream = ReaderStream::new(digest_reader).and_then(move |bytes| {
         let _guard = compression_span.enter();
+        original_counter.increment(bytes.len() as u64);
         compression_span.pb_inc(bytes.len() as u64);
         futures_util::future::ok(bytes)
     });
@@ -365,7 +358,7 @@ async fn compress_and_upload(
     let upload_speed = register_histogram!(UPLOAD_SPEED);
 
     // Create digest reader to calculate compressed file digest
-    let compressed_digest_reader = DigestReader::new(encoder, Some(compressed_counter));
+    let compressed_digest_reader = DigestReader::new(encoder);
     let compressed_digest_hasher = compressed_digest_reader.digest_handle();
     let compressed_size_tracker = compressed_digest_reader.size_tracker();
 
@@ -378,6 +371,8 @@ async fn compress_and_upload(
         let size = progress_size_tracker.load(Ordering::SeqCst) as u64;
         span.pb_set_length(size);
         span.pb_inc(bytes.len() as u64);
+
+        compressed_counter.increment(bytes.len() as u64);
 
         let elapsed = start.elapsed().as_secs_f64();
         upload_speed.record(size as f64 / elapsed);
