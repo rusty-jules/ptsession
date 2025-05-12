@@ -257,7 +257,6 @@ async fn compress_and_upload(
     file_path: AudioFilePath,
     compression: Compression,
     level: i32,
-    pushed_digests: BTreeMap<String, OciDescriptor>,
     dry_run: bool,
 ) -> Result<OciDescriptor, Box<dyn std::error::Error + Send + Sync>> {
     // Create a shared http client wrapper for this operation
@@ -443,57 +442,6 @@ async fn compress_and_upload(
         compressed_digest,
         compressed_size,
     ))
-}
-
-async fn fetch_original_digests(
-    client: &oci_client::Client,
-    reference: &Reference,
-    auth: &RegistryAuth,
-) -> Result<BTreeMap<String, OciDescriptor>, Box<dyn std::error::Error + Send + Sync>> {
-    let tags = client.list_tags(&reference, &auth, None, None).await;
-
-    // if the repository doesn't exist return empty map of digests
-    if let Err(OciDistributionError::RegistryError { .. }) = tags {
-        return Ok(BTreeMap::new());
-    } else if let Err(e) = tags {
-        error!("{e}");
-        return Err(e.into());
-    }
-
-    futures_util::stream::iter(tags.unwrap().tags.into_iter())
-        .map(|tag| {
-            let a = auth.clone();
-            let c = client.clone();
-            let r = reference.clone();
-
-            async move {
-                let reference =
-                    Reference::with_tag(r.registry().to_string(), r.repository().to_string(), tag);
-                match c.pull_image_manifest(&reference, &a).await {
-                    Ok((manifest, _)) => Ok(manifest
-                        .layers
-                        .into_iter()
-                        .filter_map(|layer| match &layer.annotations {
-                            None => None,
-                            Some(annotations) => {
-                                match annotations.get(IO_PTSESSION_ORIGINAL_DIGEST) {
-                                    None => None,
-                                    Some(digest) => Some((digest.clone(), layer)),
-                                }
-                            }
-                        })
-                        .collect::<BTreeMap<String, OciDescriptor>>()),
-                    Err(e) => match e {
-                        OciDistributionError::ImageManifestNotFoundError(_)
-                        | OciDistributionError::RegistryError { .. } => Ok(BTreeMap::new()),
-                        e => Err(e.into()),
-                    },
-                }
-            }
-        })
-        .buffer_unordered(10)
-        .try_concat()
-        .await
 }
 
 fn create_layer_descriptor(
@@ -700,8 +648,6 @@ pub async fn push(
     let auth = RegistryAuth::Anonymous;
 
     // fetch all original digests
-    let original_digests = fetch_original_digests(&client, &reference, &auth).await?;
-
     // Process all files in parallel with progress reporting
     debug!("processing audio files with parallelism: {}", parallelism);
     let total_bytes_read = register_counter!(TOTAL_BYTES_READ);
@@ -714,7 +660,6 @@ pub async fn push(
             let pool = pool.clone();
             let client = client.clone();
             let reference = reference.clone();
-            let original_digests = original_digests.clone();
 
             async move {
                 let span = tracing::info_span!(
@@ -731,7 +676,6 @@ pub async fn push(
                     file_path,
                     *compression,
                     *level,
-                    original_digests,
                     *dry_run,
                 )
                 .instrument(span)
