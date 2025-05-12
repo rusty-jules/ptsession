@@ -14,7 +14,6 @@ use crate::style::{COMPRESSION_STYLE, UPLOAD_STYLE};
 
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,9 +36,9 @@ use r2d2_sqlite::SqliteConnectionManager;
 use sha2::{Digest as _, Sha256};
 use tempfile::tempfile;
 use tokio::fs::File;
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, ReadBuf};
 use tokio_util::bytes::Bytes;
-use tokio_util::io::ReaderStream;
+use tokio_util::io::{ReaderStream, StreamReader};
 use tracing::{debug, error, info, trace, warn, Instrument};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
@@ -290,16 +289,32 @@ async fn compress_and_upload(
                 .await?;
             if blob_res.status().is_success() {
                 info!("file already exists");
-                // FIXME: race condition here if the layer was pushed after we pulled all descriptors?
-                // May want to fetch the descriptor now that we know the blob exists, though that could
-                // turn into a request cascade if many files were already pushed.
-                // Zot would allow for a more refined request with graphql, but that would make this
-                // non-oci compliant.
-                let (_, descriptor) = pushed_digests
-                    .iter()
-                    .find(|(_, descriptor)| descriptor.digest == digest)
-                    .expect("descriptor exists in pushed digests");
-                return Ok(descriptor.clone());
+                // rebuild the descriptor given the current metadata
+                // since some registries will return 200 even for blobs that are
+                // actually part of a different repository anywhere in the registry
+                let compressed_size: usize = blob_res
+                    .headers()
+                    .get("Content-Length")
+                    .and_then(|header| header.to_str().ok())
+                    // FIXME: when could the content-length be negative in the oci spec?
+                    .and_then(|header| header.parse::<usize>().ok())
+                    .ok_or("content-length header expected")?;
+                match cache::get_original_digest_by_digest(&conn, &digest)? {
+                    Some(original_digest) => {
+                        return Ok(create_layer_descriptor(
+                            file_path,
+                            file_size,
+                            file_created,
+                            file_modified,
+                            original_digest,
+                            compression,
+                            level,
+                            digest,
+                            compressed_size,
+                        ))
+                    }
+                    None => Err("digest entry in cache does not have original_digest")?,
+                }
             }
         }
         Some(conn)
@@ -340,36 +355,9 @@ async fn compress_and_upload(
         futures_util::future::ok(bytes)
     });
 
-    // Read the file into memory and compute the digest
-    // PERF: avoid this read and go back to streaming the digest since we have now
-    // confirmed that the blob doesn't exist by utilizing caching - or make this configurable
-    let buf = digest_stream
-        .fold(Ok(Vec::new()), |acc, bytes| {
-            use futures_util::future::{err, ok};
-            match acc {
-                Ok(mut acc) => match bytes {
-                    Ok(bytes) => {
-                        acc.extend_from_slice(&bytes);
-                        ok(acc)
-                    }
-                    Err(e) => return err(e),
-                },
-                Err(e) => return err(e),
-            }
-        })
-        .await?;
-    let original_digest = original_digest_hasher.lock().unwrap().clone().finalize();
-    if let Some(descriptor) = pushed_digests.get(&format!("sha256:{:x}", original_digest)) {
-        info!("file already exists");
-        if let Some(conn) = conn {
-            cache::insert_record(&conn, &digest_record.with_digest(descriptor.digest.clone()))?;
-        }
-        return Ok(descriptor.clone());
-    }
-
     // Create compression encoder
     let encoder = compression.compressor(
-        BufReader::new(Cursor::new(buf)),
+        StreamReader::new(digest_stream),
         Some(Level::Precise(level)),
     );
 
@@ -426,7 +414,12 @@ async fn compress_and_upload(
 
     // Save to cache
     if let Some(conn) = conn {
-        cache::insert_record(&conn, &digest_record.with_digest(compressed_digest.clone()))?;
+        cache::insert_record(
+            &conn,
+            &digest_record
+                .with_original_digest(original_digest.clone())
+                .with_digest(compressed_digest.clone()),
+        )?;
     }
 
     // Finish the upload
@@ -439,32 +432,17 @@ async fn compress_and_upload(
     info!("upload complete");
 
     // Output OciDescriptor of the layer
-    let mut annotations = maplit::btreemap! {
-        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.title(),
-        ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => file_created,
-        IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
-        IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
-        IO_PTSESSION_COMPRESSION_LEVEL.to_string() => level.to_string(),
-        IO_DEIS_ORAS_CONTENT_UNPACK.to_string() => "true".to_string()
-    };
-
-    if let Some(modified) = file_modified {
-        annotations.insert(IO_PTSESSION_TIME_MODIFIED.to_string(), modified);
-    }
-
-    // TODO: handle audio files other than wav with symphonia
-    let media_type = match compression {
-        Compression::None => "audio/vnd.wav".to_string(),
-        _ => format!("audio/vnd.wav+{}", compression.to_string()),
-    };
-
-    Ok(OciDescriptor {
-        urls: None,
-        digest: compressed_digest,
-        size: compressed_size as i64,
-        media_type,
-        annotations: Some(annotations),
-    })
+    Ok(create_layer_descriptor(
+        file_path,
+        file_size,
+        file_created,
+        file_modified,
+        original_digest,
+        compression,
+        level,
+        compressed_digest,
+        compressed_size,
+    ))
 }
 
 async fn fetch_original_digests(
@@ -516,6 +494,45 @@ async fn fetch_original_digests(
         .buffer_unordered(10)
         .try_concat()
         .await
+}
+
+fn create_layer_descriptor(
+    file_path: AudioFilePath,
+    file_size: u64,
+    file_created: String,
+    file_modified: Option<String>,
+    original_digest: String,
+    compression: Compression,
+    level: i32,
+    compressed_digest: String,
+    compressed_size: usize,
+) -> OciDescriptor {
+    let mut annotations = maplit::btreemap! {
+        ORG_OPENCONTAINERS_IMAGE_TITLE.to_string() => file_path.title(),
+        ORG_OPENCONTAINERS_IMAGE_CREATED.to_string() => file_created,
+        IO_PTSESSION_ORIGINAL_DIGEST.to_string() => original_digest,
+        IO_PTSESSION_ORIGINAL_SIZE.to_string() => file_size.to_string(),
+        IO_PTSESSION_COMPRESSION_LEVEL.to_string() => level.to_string(),
+        IO_DEIS_ORAS_CONTENT_UNPACK.to_string() => "true".to_string()
+    };
+
+    if let Some(modified) = file_modified {
+        annotations.insert(IO_PTSESSION_TIME_MODIFIED.to_string(), modified);
+    }
+
+    // TODO: handle audio files other than wav with symphonia
+    let media_type = match compression {
+        Compression::None => "audio/vnd.wav".to_string(),
+        _ => format!("audio/vnd.wav+{}", compression.to_string()),
+    };
+
+    OciDescriptor {
+        urls: None,
+        digest: compressed_digest,
+        size: compressed_size as i64,
+        media_type,
+        annotations: Some(annotations),
+    }
 }
 
 async fn push_manifest(

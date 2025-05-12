@@ -28,7 +28,7 @@ pub struct Arguments {
     pub logs: Option<Logs>,
 
     #[clap(flatten)]
-    pub cache: Option<Cache>,
+    pub cache: Cache,
 
     /// Subcommand
     #[command(subcommand)]
@@ -124,6 +124,7 @@ pub struct GlobalOpts {
 // TODO: add log level
 pub struct Logs {
     #[arg(long = "logs-format", default_value_t = InfoPrintArgs::Text, hide(true))]
+    #[serde(default = "InfoPrintArgs::default")]
     pub format: InfoPrintArgs,
 
     #[clap(flatten)]

@@ -4,13 +4,13 @@ use crate::Arguments;
 use oci_client::Reference;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
-use std::path::PathBuf;
 
 const TARGET_SCHEMA_VERSION: i32 = 1;
 
 #[derive(Debug, Default)]
 pub struct DigestRecord {
     digest: Option<String>,
+    original_digest: Option<String>,
     filename: String,
     absolute_path: String,
     length: u64,
@@ -48,6 +48,7 @@ impl DigestRecord {
                 unique_id: None,
                 // not to be used without a digest yet
                 digest: None,
+                original_digest: None,
             },
         }
     }
@@ -60,44 +61,49 @@ impl DigestRecordBuilder {
         self
     }
 
+    pub fn with_original_digest(mut self, original_digest: String) -> Self {
+        self.record.original_digest = Some(original_digest);
+        self
+    }
+
     pub fn with_digest(mut self, digest: String) -> DigestRecord {
         self.record.digest = Some(digest);
+        // this entire builder pattern is purely for correctness
+        if self.record.original_digest.is_none() {
+            panic!("must set original_digest before digest")
+        }
         self.record
     }
 }
 
 pub fn init_pool(config: &Arguments) -> rusqlite::Result<r2d2::Pool<SqliteConnectionManager>> {
-    if let Some(ref cache) = config.cache {
-        let path = shellexpand::tilde(&cache.path);
-        let manager = SqliteConnectionManager::file(path.as_ref());
-        let pool = r2d2::Pool::new(manager).expect("couldn't create sqlite connection pool");
+    let path = shellexpand::tilde(&config.cache.path);
+    let manager = SqliteConnectionManager::file(path.as_ref());
+    let pool = r2d2::Pool::new(manager).expect("couldn't create sqlite connection pool");
 
-        // run our migration exactly once on pool creation
-        let conn = pool.get().unwrap();
-        conn.pragma_update(None, "journal_mode", &"WAL")?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")?;
-        let current: i32 = conn.query_row("PRAGMA user_version", params![], |row| row.get(0))?;
+    // run our migration exactly once on pool creation
+    let conn = pool.get().unwrap();
+    conn.pragma_update(None, "journal_mode", &"WAL")?;
+    conn.pragma_update(None, "synchronous", &"NORMAL")?;
+    let current: i32 = conn.query_row("PRAGMA user_version", params![], |row| row.get(0))?;
 
-        if current < TARGET_SCHEMA_VERSION {
-            let sql = include_str!("../migrations/0001_create_digests.sql");
-            conn.execute_batch(&sql)?;
-            conn.pragma_update(None, "user_version", &TARGET_SCHEMA_VERSION)?;
-        }
-
-        Ok(pool)
-    } else {
-        tracing::error!("Failed to initialize cache pool");
-        Err(rusqlite::Error::InvalidPath(PathBuf::from("")))
+    if current < TARGET_SCHEMA_VERSION {
+        let sql = include_str!("../migrations/0001_create_digests.sql");
+        conn.execute_batch(&sql)?;
+        conn.pragma_update(None, "user_version", &TARGET_SCHEMA_VERSION)?;
     }
+
+    Ok(pool)
 }
 
 pub fn insert_record(conn: &rusqlite::Connection, rec: &DigestRecord) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT OR REPLACE INTO digests
-         (digest, filename, absolute_path, length, unique_id, session, hdd, repository, registry, tag)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         (digest, original_digest, filename, absolute_path, length, unique_id, session, hdd, repository, registry, tag)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             rec.digest,
+            rec.original_digest,
             rec.filename,
             rec.absolute_path,
             rec.length,
@@ -120,6 +126,19 @@ pub fn get_digest_by_absolute_path(
     let mut stmt = conn.prepare("SELECT digest FROM digests WHERE absolute_path = ?1")?;
     let mut rows = stmt.query(params![path])?;
 
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn get_original_digest_by_digest(
+    conn: &rusqlite::Connection,
+    digest: &str,
+) -> rusqlite::Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT original_digest FROM digests WHERE digest = ?1")?;
+    let mut rows = stmt.query(params![digest])?;
     if let Some(row) = rows.next()? {
         Ok(Some(row.get(0)?))
     } else {
@@ -162,15 +181,16 @@ pub fn get_record(
     if let Some(row) = rows.next()? {
         Ok(Some(DigestRecord {
             digest: row.get(0)?,
-            filename: row.get(1)?,
-            absolute_path: row.get(2)?,
-            length: row.get(3)?,
-            unique_id: row.get(4)?,
-            session: row.get(5)?,
-            hdd: row.get(6)?,
-            repository: row.get(7)?,
-            registry: row.get(8)?,
-            tag: row.get(9)?,
+            original_digest: row.get(1)?,
+            filename: row.get(2)?,
+            absolute_path: row.get(3)?,
+            length: row.get(4)?,
+            unique_id: row.get(5)?,
+            session: row.get(6)?,
+            hdd: row.get(7)?,
+            repository: row.get(8)?,
+            registry: row.get(9)?,
+            tag: row.get(10)?,
         }))
     } else {
         Ok(None)
