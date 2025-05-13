@@ -7,6 +7,7 @@ A tool for archiving [Pro Tools][pro-tools] sessions as [Oras][oras][^1] artifac
 - Configurable, per-file compression
 - Archival and retrieval of original file creation and modified timestamps
 - Fast file searching akin to Pro Tools' "Find by name and Match Duration" setting thanks to [`ignore`][ignore]
+- Optional skipping files that don't have any regions in the session
 - Local and remote Pro Tools session parsing
 - Multi-threaded, multi-connection uploads and downloads
 - Local caching of audio file digests for fast iterative archiving of multiple session versions
@@ -17,8 +18,8 @@ All without ever opening Pro Tools.
 
 ## Why not just a zip file?
 
-Many engineers just zip 'n ship sessions. This is a perfectly valid, tried-and-true method for sharing sessions with 
-collaborators. For the purposes of archival, it poses some challenges though:
+Many engineers zip session folders as a delivery method. This is a perfectly valid, tried-and-true method for sharing
+sessions with collaborators. For the purposes of archival, it poses some challenges though:
 
 1. How can you add a new version of a session (and any additional audio files) to a zip file you already sent?
 2. How can you determine which audio files someone else may already have?
@@ -29,7 +30,8 @@ Many workarounds to these problems involve the venerated "Save Copy In" + "Compa
 these are error prone and potentially dangerous operations (how many times have you double checked the session name
 before clicking the `compact` button?).
 
-Luckily, these problems have all been solved by [content-addressable storage][cas], which modern oci repositories lean on heavily.
+Luckily, these problems have all been solved by [content-addressable storage][cas], which modern oci repositories lean
+on heavily.
 This is great for archival, and even for collaboration should you choose. OCI repositories have strong notions of
 authentication and access control, allowing you to safely share sessions iteratively instead of in a one-off fashion.
 This might even be more desirable than continous sharing via the likes of Dropbox, Google Drive, or OneDrive, especially
@@ -54,6 +56,38 @@ industry as worked hard on to store massive amounts of versioned files at scale,
 - progressive garbage collection of unreferenced files
 - the many other (growing) benefits like storage tiering, repository replication, mirroring, proxying, and more as
   container registries are continously developed and improved upon
+
+## Example Configuration
+
+```toml
+# ~/.ptarchive/config.toml
+[logs]
+level = "trace"
+format = "json"
+
+[logs.file]
+directory = "~/.ptarchive/logs"
+filename.method = "hash"
+
+[metrics]
+flavor = "influxdb"
+endpoint = "http://100.103.172.27:30889/api/v2/write"
+database = "ptarchive"
+table = "metrics"
+
+[command.push]
+compression = { compressor = "zstd", level = 9 }
+depth = 4
+parallelism = 8 
+regions-only = true
+search-paths = ["../"]
+
+[cache]
+path = "~/.ptarchive/cache.db"
+```
+
+> [!NOTE]
+> Currently values in the config file override any values passed via flags.
 
 [^1]: Currently ptarchive is more "oras-like". Though oras can pull any session pushed by ptarchive, oras does not support
 any compression algorithm other than gzip, which ptarchive does not use by default. This results in files being pulled
